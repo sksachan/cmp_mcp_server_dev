@@ -1,6 +1,6 @@
 # CMP MCP Server
 
-Remote MCP server for ChatGPT that starts a Bodhi workflow, submits HITL deployment inputs, waits for completion, and returns Hello World EKS deployment details.
+Remote MCP server for ChatGPT that starts a Bodhi workflow, submits HITL deployment inputs, returns a `run_id` quickly, and exposes a status tool that executes validated EKS deployment artifacts when Bodhi completes.
 
 ## Local Development
 
@@ -99,6 +99,9 @@ Optional polling variables:
 BODHI_HITL_POLL_INTERVAL_MS=3000
 BODHI_RUN_POLL_INTERVAL_MS=20000
 BODHI_TIMEOUT_MS=1800000
+BODHI_START_TIMEOUT_MS=90000
+REQUEST_DEDUP_TTL_MS=900000
+JOB_RETENTION_MS=86400000
 DEFAULT_CLUSTER_NAME=hello-world-demo
 DEFAULT_NAMESPACE=hello-world
 DEFAULT_BUDGET_LIMIT_USD=100
@@ -108,3 +111,5 @@ EXECUTOR_COMMAND_TIMEOUT_MS=900000
 ```
 
 Railway uses the checked-in `Dockerfile` so the runtime image contains Node 22, AWS CLI, AWS SAM CLI, kubectl, bash, and Python. Bodhi generates deployment artifacts only; this MCP service validates those artifacts and executes fixed AWS/SAM/kubectl commands.
+
+The main tool, `deploy_hello_world_to_eks`, starts the Bodhi workflow and returns a `run_id`. ChatGPT should then call `get_hello_world_eks_deployment_status` with that `run_id`. The deploy tool requires `deployment_context`, so ChatGPT should ask clarifying questions about purpose, environment, audience, POC/MVP/production maturity, required components, and cost/security constraints before starting infrastructure work.

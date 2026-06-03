@@ -76,6 +76,9 @@ DEFAULT_BUDGET_LIMIT_USD=100
 BODHI_HITL_POLL_INTERVAL_MS=3000
 BODHI_RUN_POLL_INTERVAL_MS=20000
 BODHI_TIMEOUT_MS=1800000
+BODHI_START_TIMEOUT_MS=90000
+REQUEST_DEDUP_TTL_MS=900000
+JOB_RETENTION_MS=86400000
 AWS_ACCESS_KEY_ID=<aws-access-key-id>
 AWS_SECRET_ACCESS_KEY=<aws-secret-access-key>
 AWS_SESSION_TOKEN=<optional-session-token>
@@ -107,12 +110,16 @@ Expected tool:
 
 ```text
 deploy_hello_world_to_eks
+get_hello_world_eks_deployment_status
 ```
+
+`deploy_hello_world_to_eks` starts the Bodhi workflow and returns a `run_id` quickly to avoid ChatGPT request timeouts. `get_hello_world_eks_deployment_status` polls that run and executes validated artifacts after Bodhi returns strict JSON. The deploy tool requires `deployment_context`; ask clarifying questions before calling it.
 
 Minimum test request:
 
 ```json
 {
+  "deployment_context": "Purpose: POC validation for ChatGPT-triggered EKS deployment. Environment: dev. Audience: personal/internal demo. Maturity: MVP. Required components: minimal Hello World frontend on EKS with cost-conscious defaults and no production HA requirements.",
   "app_name": "hello-world",
   "github_repo": "sksachan/cmp_mcp_server_dev",
   "github_branch": "main",

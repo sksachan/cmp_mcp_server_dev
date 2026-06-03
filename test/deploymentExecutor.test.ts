@@ -16,12 +16,16 @@ const config: Config = {
   bodhiHitlPollIntervalMs: 1,
   bodhiRunPollIntervalMs: 1,
   bodhiTimeoutMs: 1000,
+  bodhiStartTimeoutMs: 1000,
   oauthLoginPassword: "oauth-password",
   oauthAccessTokenTtlSeconds: 3600,
-  executorCommandTimeoutMs: 1000
+  executorCommandTimeoutMs: 1000,
+  requestDedupTtlMs: 1000,
+  jobRetentionMs: 60000
 };
 
 const request: DeployRequest = {
+  deployment_context: "Purpose: POC validation. Environment: dev. Audience: personal demo. Maturity: MVP. Components: minimal EKS app with cost-conscious defaults.",
   app_name: "hello-world",
   github_repo: "sksachan/cmp_mcp_server_dev",
   github_branch: "main",

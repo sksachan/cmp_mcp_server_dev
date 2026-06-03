@@ -10,10 +10,13 @@ export type Config = {
   bodhiHitlPollIntervalMs: number;
   bodhiRunPollIntervalMs: number;
   bodhiTimeoutMs: number;
+  bodhiStartTimeoutMs: number;
   publicBaseUrl?: string;
   oauthLoginPassword: string;
   oauthAccessTokenTtlSeconds: number;
   executorCommandTimeoutMs: number;
+  requestDedupTtlMs: number;
+  jobRetentionMs: number;
 };
 
 function required(name: string): string {
@@ -47,9 +50,12 @@ export function loadConfig(): Config {
     bodhiHitlPollIntervalMs: numberFromEnv("BODHI_HITL_POLL_INTERVAL_MS", 3000),
     bodhiRunPollIntervalMs: numberFromEnv("BODHI_RUN_POLL_INTERVAL_MS", 20000),
     bodhiTimeoutMs: numberFromEnv("BODHI_TIMEOUT_MS", 1800000),
+    bodhiStartTimeoutMs: numberFromEnv("BODHI_START_TIMEOUT_MS", 90000),
     publicBaseUrl: process.env.PUBLIC_BASE_URL?.replace(/\/+$/, ""),
     oauthLoginPassword: process.env.OAUTH_LOGIN_PASSWORD ?? required("MCP_SHARED_SECRET"),
     oauthAccessTokenTtlSeconds: numberFromEnv("OAUTH_ACCESS_TOKEN_TTL_SECONDS", 86400),
-    executorCommandTimeoutMs: numberFromEnv("EXECUTOR_COMMAND_TIMEOUT_MS", 900000)
+    executorCommandTimeoutMs: numberFromEnv("EXECUTOR_COMMAND_TIMEOUT_MS", 900000),
+    requestDedupTtlMs: numberFromEnv("REQUEST_DEDUP_TTL_MS", 900000),
+    jobRetentionMs: numberFromEnv("JOB_RETENTION_MS", 86400000)
   };
 }

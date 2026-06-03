@@ -15,13 +15,17 @@ const config: Config = {
   bodhiHitlPollIntervalMs: 1,
   bodhiRunPollIntervalMs: 1,
   bodhiTimeoutMs: 1000,
+  bodhiStartTimeoutMs: 1000,
   publicBaseUrl: "https://mcp.example",
   oauthLoginPassword: "oauth-password",
   oauthAccessTokenTtlSeconds: 3600,
-  executorCommandTimeoutMs: 1000
+  executorCommandTimeoutMs: 1000,
+  requestDedupTtlMs: 1000,
+  jobRetentionMs: 60000
 };
 
 const request: DeployRequest = {
+  deployment_context: "Purpose: POC validation. Environment: dev. Audience: personal demo. Maturity: MVP. Components: minimal EKS app with cost-conscious defaults.",
   app_name: "hello-world",
   github_repo: "sksachan/cmp_mcp_server_dev",
   github_branch: "main",
@@ -102,6 +106,71 @@ describe("BodhiClient", () => {
     expect(result.application_url).toBe("https://app.example.com");
     expect(result.estimated_monthly_cost_usd).toBe(42);
     expect(calls.some((call) => call.url.endsWith("/tasks/task-id/runs"))).toBe(true);
+  });
+
+  it("starts a run without waiting for Bodhi completion", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      calls.push({ url: String(url), init });
+
+      if (String(url).endsWith("/tasks/task-id/runs") && init?.method === "POST") {
+        return json({ id: "run-started" });
+      }
+
+      if (String(url).endsWith("/tasks/runs/run-started/hitltasks") && init?.method !== "POST") {
+        return json({
+          hitltasks: [
+            {
+              id: "hitl-request",
+              status: "pending"
+            }
+          ]
+        });
+      }
+
+      if (String(url).endsWith("/tasks/runs/run-started/hitltasks") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        expect(body.hitltasks[0].response.deployment_context).toContain("POC validation");
+        return json({ ok: true });
+      }
+
+      return json({ error: "unexpected" }, 404);
+    };
+
+    const client = new BodhiClient(config, fetchImpl as typeof fetch);
+    const result = await client.startHelloWorldDeployment(request);
+
+    expect(result.status).toBe("started");
+    expect(result.run_id).toBe("run-started");
+    expect(calls.some((call) => call.url.endsWith("/tasks/task-id/runs/run-started"))).toBe(false);
+  });
+
+  it("deduplicates matching in-flight deployment starts", async () => {
+    let createRunCount = 0;
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      if (String(url).endsWith("/tasks/task-id/runs") && init?.method === "POST") {
+        createRunCount += 1;
+        return json({ id: "run-dedup" });
+      }
+
+      if (String(url).endsWith("/tasks/runs/run-dedup/hitltasks") && init?.method !== "POST") {
+        return json({ hitltasks: [{ id: "hitl-request", status: "pending" }] });
+      }
+
+      if (String(url).endsWith("/tasks/runs/run-dedup/hitltasks") && init?.method === "POST") {
+        return json({ ok: true });
+      }
+
+      return json({ error: "unexpected" }, 404);
+    };
+
+    const client = new BodhiClient(config, fetchImpl as typeof fetch);
+    const first = await client.startHelloWorldDeployment(request);
+    const second = await client.startHelloWorldDeployment(request);
+
+    expect(first.run_id).toBe("run-dedup");
+    expect(second.run_id).toBe("run-dedup");
+    expect(createRunCount).toBe(1);
   });
 
   it("executes Bodhi-generated artifact bundles through the constrained executor", async () => {
@@ -187,6 +256,31 @@ describe("BodhiClient", () => {
     expect(result.deployment_plan).toEqual(["Validate", "Deploy"]);
     expect(result.cost_notes).toBe("Development estimate");
     expect(result.executor_logs?.[0].command).toContain("sam validate");
+  });
+
+  it("reports artifacts_missing when Bodhi returns markdown artifact notes instead of JSON artifacts", async () => {
+    const fetchImpl = async (url: string | URL | Request): Promise<Response> => {
+      if (String(url).endsWith("/tasks/task-id/runs/run-markdown")) {
+        return json({
+          status: "completed",
+          result: {
+            response: "## Deployment Artifacts\nGenerated template.yaml and k8s.yaml. Run sam deploy and kubectl apply manually."
+          }
+        });
+      }
+
+      if (String(url).endsWith("/tasks/runs/run-markdown/hitltasks")) {
+        return json({ hitltasks: [] });
+      }
+
+      return json({ error: "unexpected" }, 404);
+    };
+
+    const client = new BodhiClient(config, fetchImpl as typeof fetch);
+    const result = await client.getDeploymentStatus({ run_id: "run-markdown" });
+
+    expect(result.status).toBe("artifacts_missing");
+    expect(result.logs_summary).toContain("markdown");
   });
 });
 

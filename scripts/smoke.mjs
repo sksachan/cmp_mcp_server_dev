@@ -88,6 +88,10 @@ async function assertToolsList() {
     tools.some((tool) => tool.name === "deploy_hello_world_to_eks"),
     `tools/list did not expose deploy_hello_world_to_eks: ${JSON.stringify(event)}`
   );
+  assert(
+    tools.some((tool) => tool.name === "get_hello_world_eks_deployment_status"),
+    `tools/list did not expose get_hello_world_eks_deployment_status: ${JSON.stringify(event)}`
+  );
   const deployTool = tools.find((tool) => tool.name === "deploy_hello_world_to_eks");
   const schemes = deployTool.securitySchemes ?? deployTool._meta?.securitySchemes ?? [];
   assert(
@@ -100,6 +104,7 @@ async function assertCancelledToolCall() {
   const event = await mcpRequest(2, "tools/call", {
     name: "deploy_hello_world_to_eks",
     arguments: {
+      deployment_context: "Purpose: smoke test only. Environment: dev. Audience: internal validation. Maturity: POC. Components: no AWS execution because confirm_deploy is false.",
       confirm_deploy: false
     }
   });
@@ -113,6 +118,10 @@ async function assertOAuthToolsList(accessToken) {
   assert(
     tools.some((tool) => tool.name === "deploy_hello_world_to_eks"),
     `OAuth tools/list did not expose deploy_hello_world_to_eks: ${JSON.stringify(event)}`
+  );
+  assert(
+    tools.some((tool) => tool.name === "get_hello_world_eks_deployment_status"),
+    `OAuth tools/list did not expose get_hello_world_eks_deployment_status: ${JSON.stringify(event)}`
   );
 }
 

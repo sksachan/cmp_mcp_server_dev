@@ -1,4 +1,5 @@
 {
+  "deployment_context": "Purpose: POC validation for ChatGPT-triggered EKS deployment. Environment: dev. Audience: personal/internal demo. Maturity: MVP. Required components: minimal Hello World frontend on EKS with cost-conscious defaults and no production HA requirements.",
   "app_name": "hello-world",
   "github_repo": "sksachan/cmp_mcp_server_dev",
   "github_branch": "main",

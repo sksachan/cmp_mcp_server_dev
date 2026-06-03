@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const DeployRequestSchema = z.object({
+  deployment_context: z.string().trim().min(20, "Describe the deployment purpose, environment, audience, maturity, and required components before starting infrastructure work."),
   app_name: z.string().trim().min(1).default("hello-world"),
   github_repo: z.string().trim().min(1).default("sksachan/cmp_mcp_server_dev"),
   github_branch: z.string().trim().min(1).default("main"),
@@ -15,6 +16,12 @@ export const DeployRequestSchema = z.object({
 });
 
 export type DeployRequest = z.infer<typeof DeployRequestSchema>;
+
+export const DeploymentStatusRequestSchema = z.object({
+  run_id: z.string().trim().min(1)
+});
+
+export type DeploymentStatusRequest = z.infer<typeof DeploymentStatusRequestSchema>;
 
 export const DeploymentResultSchema = z.object({
   status: z.string(),
