@@ -14,7 +14,10 @@ const config: Config = {
   bodhiTaskId: "task-id",
   bodhiHitlPollIntervalMs: 1,
   bodhiRunPollIntervalMs: 1,
-  bodhiTimeoutMs: 1000
+  bodhiTimeoutMs: 1000,
+  publicBaseUrl: "https://mcp.example",
+  oauthLoginPassword: "oauth-password",
+  oauthAccessTokenTtlSeconds: 3600
 };
 
 const request: DeployRequest = {

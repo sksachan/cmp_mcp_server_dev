@@ -4,27 +4,55 @@ import { BodhiClient } from "./bodhiClient.js";
 import type { Config } from "./config.js";
 import { isAuthorized } from "./auth.js";
 import { createMcpServer } from "./mcpServer.js";
+import { OAuthService } from "./oauth.js";
 
 export function createHttpServer(config: Config): http.Server {
   const bodhiClient = new BodhiClient(config);
+  const oauthService = new OAuthService(config);
 
   return http.createServer(async (req, res) => {
     try {
-      if (req.method === "GET" && req.url === "/health") {
+      const baseUrl = getBaseUrl(req, config);
+      const url = new URL(req.url ?? "/", baseUrl);
+
+      if (req.method === "GET" && url.pathname === "/health") {
         return json(res, 200, {
           status: "ok",
           service: "cmp-bodhi-eks-deployer"
         });
       }
 
-      if (req.url?.startsWith("/mcp")) {
+      if (req.method === "GET" && (url.pathname === "/.well-known/oauth-protected-resource" || url.pathname === "/.well-known/oauth-protected-resource/mcp")) {
+        return json(res, 200, oauthService.getProtectedResourceMetadata(baseUrl));
+      }
+
+      if (req.method === "GET" && (url.pathname === "/.well-known/oauth-authorization-server" || url.pathname === "/.well-known/openid-configuration")) {
+        return json(res, 200, oauthService.getAuthorizationServerMetadata(baseUrl));
+      }
+
+      if (url.pathname === "/oauth/register" && req.method === "POST") {
+        setCors(res);
+        return oauthService.registerClient(req, res);
+      }
+
+      if (url.pathname === "/oauth/authorize" && (req.method === "GET" || req.method === "POST")) {
+        return oauthService.authorize(req, res, baseUrl);
+      }
+
+      if (url.pathname === "/oauth/token" && req.method === "POST") {
+        setCors(res);
+        return oauthService.token(req, res);
+      }
+
+      if (url.pathname.startsWith("/mcp")) {
         if (req.method === "OPTIONS") {
           setCors(res);
           res.writeHead(204);
           return res.end();
         }
 
-        if (!isAuthorized(req, config.mcpSharedSecret)) {
+        if (!isAuthorized(req, config, oauthService, baseUrl)) {
+          res.setHeader("WWW-Authenticate", oauthService.challenge(baseUrl));
           return json(res, 401, { error: "Unauthorized" });
         }
 
@@ -80,4 +108,15 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   setCors(res);
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
+}
+
+function getBaseUrl(req: IncomingMessage, config: Config): string {
+  if (config.publicBaseUrl) return config.publicBaseUrl;
+  const proto = headerValue(req.headers["x-forwarded-proto"]) ?? "http";
+  const host = headerValue(req.headers["x-forwarded-host"]) ?? headerValue(req.headers.host) ?? "localhost";
+  return `${proto.split(",")[0]}://${host.split(",")[0]}`.replace(/\/+$/, "");
+}
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }

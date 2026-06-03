@@ -8,14 +8,20 @@ export function createMcpServer(bodhiClient: BodhiClient): McpServer {
     version: "0.1.0"
   });
 
+  const deployToolOptions = {
+    title: "Deploy Hello World to EKS",
+    description:
+      "Triggers the Bodhi workflow, submits HITL inputs, waits for completion, and returns Hello World EKS deployment details.",
+    inputSchema: DeployRequestSchema.shape,
+    securitySchemes: [{ type: "oauth2", scopes: ["deploy:eks"] }],
+    _meta: {
+      securitySchemes: [{ type: "oauth2", scopes: ["deploy:eks"] }]
+    }
+  };
+
   server.registerTool(
     "deploy_hello_world_to_eks",
-    {
-      title: "Deploy Hello World to EKS",
-      description:
-        "Triggers the Bodhi workflow, submits HITL inputs, waits for completion, and returns Hello World EKS deployment details.",
-      inputSchema: DeployRequestSchema.shape
-    },
+    deployToolOptions as Parameters<McpServer["registerTool"]>[1],
     async (input) => {
       const request = DeployRequestSchema.parse(input);
       const result = await bodhiClient.deployHelloWorld(request);

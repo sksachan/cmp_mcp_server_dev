@@ -36,6 +36,25 @@ or:
 X-MCP-Shared-Secret: <MCP_SHARED_SECRET>
 ```
 
+ChatGPT custom MCP apps should use OAuth, because the app setup UI does not provide custom header configuration. The server exposes OAuth discovery and token endpoints:
+
+```text
+/.well-known/oauth-protected-resource
+/.well-known/oauth-authorization-server
+/oauth/register
+/oauth/authorize
+/oauth/token
+```
+
+For ChatGPT, select OAuth and use:
+
+```text
+Server URL: https://<railway-domain>/mcp
+OAuth login password: OAUTH_LOGIN_PASSWORD
+```
+
+Set `PUBLIC_BASE_URL=https://<railway-domain>` in Railway so OAuth metadata uses the public HTTPS origin.
+
 ## Railway
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for the full Bodhi, GitHub, Railway, and ChatGPT connector handoff.
@@ -67,6 +86,8 @@ BODHI_TASK_ID=9664fd27-c7e6-4595-963e-c04c6ecd59e8
 AWS_ACCOUNT_ID=051370627449
 AWS_ACCOUNT_ALIAS=demo
 DEFAULT_AWS_REGION=us-east-1
+PUBLIC_BASE_URL=https://<railway-domain>
+OAUTH_LOGIN_PASSWORD=<password-you-enter-during-chatgpt-oauth-linking>
 ```
 
 Optional polling variables:
@@ -78,4 +99,5 @@ BODHI_TIMEOUT_MS=1800000
 DEFAULT_CLUSTER_NAME=hello-world-demo
 DEFAULT_NAMESPACE=hello-world
 DEFAULT_BUDGET_LIMIT_USD=100
+OAUTH_ACCESS_TOKEN_TTL_SECONDS=86400
 ```

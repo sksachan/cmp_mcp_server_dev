@@ -59,6 +59,9 @@ Required env vars:
 ```text
 NODE_ENV=production
 MCP_SHARED_SECRET=<strong-random-secret>
+PUBLIC_BASE_URL=https://<railway-domain>
+OAUTH_LOGIN_PASSWORD=<password-you-enter-during-chatgpt-oauth-linking>
+OAUTH_ACCESS_TOKEN_TTL_SECONDS=86400
 BODHI_API_BASE_URL=https://sapientaiproducts.com/save/api/v1
 BODHI_PAT_TOKEN=<real-pat-token>
 BODHI_WORKFLOW_ID=8598b371-272b-44ca-b7c9-3ff772e96477
@@ -84,11 +87,13 @@ Connector URL:
 https://<railway-domain>/mcp
 ```
 
-Auth header:
+Authentication:
 
 ```text
-Authorization: Bearer <MCP_SHARED_SECRET>
+OAuth
 ```
+
+ChatGPT discovers OAuth metadata from `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`. During linking, enter the `OAUTH_LOGIN_PASSWORD` value in the authorization page. `MCP_SHARED_SECRET` remains supported for non-ChatGPT smoke tests and direct clients that can send headers.
 
 Expected tool:
 
