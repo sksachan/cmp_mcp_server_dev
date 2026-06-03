@@ -37,6 +37,21 @@ describe("artifact validation", () => {
     expect(validated.metadata.stack_name).toBe("hello-world-dev");
   });
 
+  it("extracts artifact bundles from nested Bodhi node output", () => {
+    const bundle = parseArtifactBundle({
+      "Infra Build and Deployment Agent": {
+        data: {
+          result: {
+            response: JSON.stringify(validBundle)
+          }
+        }
+      }
+    });
+
+    expect(bundle?.status).toBe("artifacts_ready");
+    expect(bundle?.deployment_artifacts?.[0].filename).toBe("template.yaml");
+  });
+
   it("rejects invalid JSON", () => {
     expect(() => parseArtifactBundle("{not-json")).toThrow();
   });

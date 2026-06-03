@@ -110,6 +110,6 @@ AWS_SESSION_TOKEN=<optional-session-token>
 EXECUTOR_COMMAND_TIMEOUT_MS=900000
 ```
 
-Railway uses the checked-in `Dockerfile` so the runtime image contains Node 22, AWS CLI, AWS SAM CLI, kubectl, bash, and Python. Bodhi generates deployment artifacts only; this MCP service validates those artifacts and executes fixed AWS/SAM/kubectl commands.
+Railway uses the checked-in `Dockerfile` so the runtime image contains Node 22, AWS CLI, AWS SAM CLI, kubectl, bash, and Python. Bodhi generates deployment artifacts only; this MCP service validates those artifacts and executes fixed AWS/SAM/kubectl commands. Infrastructure is deployed through CloudFormation via `sam validate` and `sam deploy`; Kubernetes manifests are applied only after the CloudFormation stack succeeds.
 
 The main tool, `deploy_hello_world_to_eks`, starts the Bodhi workflow and returns a `run_id`. ChatGPT should then call `get_hello_world_eks_deployment_status` with that `run_id`. The deploy tool requires `deployment_context`, so ChatGPT should ask clarifying questions about purpose, environment, audience, POC/MVP/production maturity, required components, and cost/security constraints before starting infrastructure work.

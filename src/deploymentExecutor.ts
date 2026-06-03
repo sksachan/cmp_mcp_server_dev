@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -45,11 +45,44 @@ export class DeploymentExecutor {
       AWS_DEFAULT_REGION: region
     };
 
+    const templatePath = join(workspace, bundle.cloudformationTemplate.filename);
+    const manifestPath = bundle.kubernetesManifest ? join(workspace, bundle.kubernetesManifest.filename) : undefined;
+    const template = await readFile(templatePath, "utf8");
+
+    if (template.includes("REPLACEME_OIDC_ID")) {
+      const describeCluster = await this.runner("aws", [
+        "eks",
+        "describe-cluster",
+        "--name",
+        clusterName,
+        "--region",
+        region,
+        "--query",
+        "cluster.identity.oidc.issuer",
+        "--output",
+        "text"
+      ], {
+        cwd: workspace,
+        timeoutMs: this.config.executorCommandTimeoutMs,
+        env
+      });
+      commands.push(describeCluster);
+      if (describeCluster.exitCode !== 0) return failedResult(workspace, commands);
+
+      const oidcId = extractOidcId(describeCluster.stdout);
+      if (!oidcId) {
+        commands.push(localFailure("resolve EKS OIDC provider ID", `Could not extract OIDC provider ID from: ${describeCluster.stdout}`));
+        return failedResult(workspace, commands);
+      }
+      await writeFile(templatePath, template.replaceAll("REPLACEME_OIDC_ID", oidcId), "utf8");
+    }
+
     commands.push(await this.runner("sam", ["validate", "--template-file", bundle.cloudformationTemplate.filename], {
       cwd: workspace,
       timeoutMs: this.config.executorCommandTimeoutMs,
       env
     }));
+    if (lastCommandFailed(commands)) return failedResult(workspace, commands);
 
     commands.push(await this.runner("sam", [
       "deploy",
@@ -69,24 +102,55 @@ export class DeploymentExecutor {
       timeoutMs: this.config.executorCommandTimeoutMs,
       env
     }));
+    if (lastCommandFailed(commands)) return failedResult(workspace, commands);
 
     if (bundle.kubernetesManifest) {
+      const manifest = await readFile(manifestPath!, "utf8");
+      if (manifest.includes("REPLACEME_POD_ROLE_ARN")) {
+        const describeStack = await this.runner("aws", [
+          "cloudformation",
+          "describe-stacks",
+          "--stack-name",
+          stackName,
+          "--region",
+          region,
+          "--query",
+          "Stacks[0].Outputs[?OutputKey=='PodRoleArn'].OutputValue | [0]",
+          "--output",
+          "text"
+        ], {
+          cwd: workspace,
+          timeoutMs: this.config.executorCommandTimeoutMs,
+          env
+        });
+        commands.push(describeStack);
+        if (describeStack.exitCode !== 0) return failedResult(workspace, commands);
+
+        const podRoleArn = describeStack.stdout.trim();
+        if (!podRoleArn || podRoleArn === "None") {
+          commands.push(localFailure("resolve PodRoleArn stack output", `CloudFormation stack ${stackName} did not return PodRoleArn.`));
+          return failedResult(workspace, commands);
+        }
+        await writeFile(manifestPath!, manifest.replaceAll("REPLACEME_POD_ROLE_ARN", podRoleArn), "utf8");
+      }
+
       commands.push(await this.runner("aws", ["eks", "update-kubeconfig", "--name", clusterName, "--region", region], {
         cwd: workspace,
         timeoutMs: this.config.executorCommandTimeoutMs,
         env
       }));
+      if (lastCommandFailed(commands)) return failedResult(workspace, commands);
 
       commands.push(await this.runner("kubectl", ["apply", "-n", namespace, "-f", bundle.kubernetesManifest.filename], {
         cwd: workspace,
         timeoutMs: this.config.executorCommandTimeoutMs,
         env
       }));
+      if (lastCommandFailed(commands)) return failedResult(workspace, commands);
     }
 
-    const failed = commands.find((command) => command.exitCode !== 0);
     return {
-      status: failed ? "failed" : "deployed",
+      status: "deployed",
       workspace,
       commands,
       application_url: stringValue(bundle.metadata.application_url),
@@ -122,6 +186,7 @@ export class DeploymentExecutor {
 
     if (bundle.kubernetesManifest) {
       plan.push(
+        { command: "aws", args: ["cloudformation", "describe-stacks", "--stack-name", stackName, "--region", region, "--query", "Stacks[0].Outputs[?OutputKey=='PodRoleArn'].OutputValue | [0]", "--output", "text"] },
         { command: "aws", args: ["eks", "update-kubeconfig", "--name", clusterName, "--region", region] },
         { command: "kubectl", args: ["apply", "-n", namespace, "-f", bundle.kubernetesManifest.filename] }
       );
@@ -184,6 +249,34 @@ export async function runCommand(command: string, args: string[], options: { cwd
 
 function summarizeCommands(commands: CommandResult[]): string {
   return commands.map((command) => `${command.exitCode === 0 ? "OK" : "FAILED"}: ${command.command}`).join("\n");
+}
+
+function failedResult(workspace: string, commands: CommandResult[]): ExecutorResult {
+  return {
+    status: "failed",
+    workspace,
+    commands,
+    logs_summary: summarizeCommands(commands)
+  };
+}
+
+function lastCommandFailed(commands: CommandResult[]): boolean {
+  return commands.length > 0 && commands[commands.length - 1].exitCode !== 0;
+}
+
+function localFailure(command: string, stderr: string): CommandResult {
+  return {
+    command,
+    exitCode: 1,
+    stdout: "",
+    stderr
+  };
+}
+
+function extractOidcId(value: string): string | undefined {
+  const trimmed = value.trim();
+  const match = trimmed.match(/\/id\/([A-Za-z0-9_-]+)/);
+  return match?.[1];
 }
 
 function formatCommand(command: string, args: string[]): string {

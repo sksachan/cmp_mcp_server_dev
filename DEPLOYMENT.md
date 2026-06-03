@@ -88,7 +88,7 @@ EXECUTOR_COMMAND_TIMEOUT_MS=900000
 
 Railway normally provides `PORT`; do not hard-code it unless the Railway project requires it.
 
-The Dockerfile installs AWS CLI, AWS SAM CLI, kubectl, bash, and Python. The MCP executor rejects arbitrary commands from Bodhi and only runs fixed deployment commands against validated artifacts.
+The Dockerfile installs AWS CLI, AWS SAM CLI, kubectl, bash, and Python. The MCP executor rejects arbitrary commands from Bodhi and only runs fixed deployment commands against validated artifacts. AWS infrastructure is created or updated through CloudFormation via `sam validate` and `sam deploy`; Kubernetes manifests are applied only after the CloudFormation stack succeeds.
 
 ## 4. ChatGPT Connector
 

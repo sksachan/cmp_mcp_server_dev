@@ -70,8 +70,9 @@ describe("DeploymentExecutor", () => {
     const executor = new DeploymentExecutor(config);
     const plan = executor.buildCommandPlan(bundle, request);
 
-    expect(plan.map((step) => step.command)).toEqual(["sam", "sam", "aws", "kubectl"]);
+    expect(plan.map((step) => step.command)).toEqual(["sam", "sam", "aws", "aws", "kubectl"]);
     expect(plan[1].args).toContain("--no-confirm-changeset");
-    expect(plan[3].args).toEqual(["apply", "-n", "hello-world", "-f", "k8s.yaml"]);
+    expect(plan[2].args[0]).toBe("cloudformation");
+    expect(plan[4].args).toEqual(["apply", "-n", "hello-world", "-f", "k8s.yaml"]);
   });
 });

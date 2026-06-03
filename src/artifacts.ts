@@ -26,10 +26,20 @@ export type DeploymentArtifact = z.infer<typeof DeploymentArtifactSchema>;
 export type ArtifactBundle = z.infer<typeof ArtifactBundleSchema>;
 
 export function parseArtifactBundle(value: unknown): ArtifactBundle | null {
-  const payload = unwrapJson(value);
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
-  if (!("deployment_artifacts" in payload)) return null;
-  return ArtifactBundleSchema.parse(payload);
+  if (typeof value === "string" && looksLikeJson(value)) {
+    const payload = unwrapJson(value);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+    if (!("deployment_artifacts" in payload)) return null;
+    return ArtifactBundleSchema.parse(payload);
+  }
+
+  for (const candidate of artifactCandidates(value)) {
+    const payload = tryUnwrapJson(candidate);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+    if (!("deployment_artifacts" in payload)) continue;
+    return ArtifactBundleSchema.parse(payload);
+  }
+  return null;
 }
 
 export function validateArtifactBundle(bundle: ArtifactBundle): ValidatedArtifactBundle {
@@ -125,5 +135,46 @@ function tryUnwrapJson(value: unknown): unknown | null {
     return unwrapJson(value);
   } catch {
     return null;
+  }
+}
+
+function looksLikeJson(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith("```");
+}
+
+function* artifactCandidates(value: unknown, seen = new Set<unknown>(), depth = 0): Generator<unknown> {
+  if (depth > 8 || value == null) return;
+  if ((typeof value === "object" || typeof value === "function") && seen.has(value)) return;
+  if (typeof value === "object" || typeof value === "function") seen.add(value);
+
+  yield value;
+
+  const unwrapped = tryUnwrapJson(value);
+  if (unwrapped && unwrapped !== value) {
+    yield* artifactCandidates(unwrapped, seen, depth + 1);
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      yield* artifactCandidates(item, seen, depth + 1);
+    }
+    return;
+  }
+
+  if (typeof value === "object" && value !== null) {
+    const object = value as Record<string, unknown>;
+    const preferredKeys = ["deployment_artifacts", "result", "response", "output", "text", "data"];
+    for (const key of preferredKeys) {
+      if (key in object) {
+        yield* artifactCandidates(object[key], seen, depth + 1);
+      }
+    }
+
+    for (const [key, nested] of Object.entries(object)) {
+      if (!preferredKeys.includes(key)) {
+        yield* artifactCandidates(nested, seen, depth + 1);
+      }
+    }
   }
 }
