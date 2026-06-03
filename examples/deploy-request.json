@@ -1,0 +1,13 @@
+{
+  "app_name": "hello-world",
+  "github_repo": "sksachan/cmp_mcp_server_dev",
+  "github_branch": "main",
+  "aws_account_id": "051370627449",
+  "aws_account_alias": "demo",
+  "aws_region": "us-east-1",
+  "cluster_name": "hello-world-demo",
+  "namespace": "hello-world",
+  "environment": "dev",
+  "budget_limit_usd": 100,
+  "confirm_deploy": true
+}
