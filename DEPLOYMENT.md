@@ -90,6 +90,8 @@ Railway normally provides `PORT`; do not hard-code it unless the Railway project
 
 The Dockerfile installs AWS CLI, AWS SAM CLI, kubectl, bash, and Python. The MCP executor rejects arbitrary commands from Bodhi and only runs fixed deployment commands against validated artifacts. AWS infrastructure is created or updated through CloudFormation via `sam validate` and `sam deploy`; Kubernetes manifests are applied only after the CloudFormation stack succeeds.
 
+The executor also normalizes generated EKS CloudFormation templates before validation: inline `SecurityGroupIngress` rules that reference other security groups are removed from `AWS::EC2::SecurityGroup` resources, leaving standalone `AWS::EC2::SecurityGroupIngress` resources to avoid CloudFormation circular dependencies.
+
 ## 4. ChatGPT Connector
 
 Connector URL:

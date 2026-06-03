@@ -47,7 +47,18 @@ export class DeploymentExecutor {
 
     const templatePath = join(workspace, bundle.cloudformationTemplate.filename);
     const manifestPath = bundle.kubernetesManifest ? join(workspace, bundle.kubernetesManifest.filename) : undefined;
-    const template = await readFile(templatePath, "utf8");
+    let template = await readFile(templatePath, "utf8");
+    const normalized = normalizeCloudFormationTemplate(template);
+    if (normalized.changed) {
+      template = normalized.content;
+      await writeFile(templatePath, template, "utf8");
+      commands.push({
+        command: "normalize CloudFormation template",
+        exitCode: 0,
+        stdout: normalized.summary,
+        stderr: ""
+      });
+    }
 
     if (template.includes("REPLACEME_OIDC_ID")) {
       const describeCluster = await this.runner("aws", [
@@ -96,7 +107,8 @@ export class DeploymentExecutor {
       "CAPABILITY_IAM",
       "CAPABILITY_NAMED_IAM",
       "--no-confirm-changeset",
-      "--no-fail-on-empty-changeset"
+      "--no-fail-on-empty-changeset",
+      ...parameterOverrideArgs(bundle.metadata)
     ], {
       cwd: workspace,
       timeoutMs: this.config.executorCommandTimeoutMs,
@@ -163,6 +175,7 @@ export class DeploymentExecutor {
     const clusterName = stringValue(bundle.metadata.cluster_name) ?? request.cluster_name;
     const namespace = stringValue(bundle.metadata.namespace) ?? request.namespace;
     const region = stringValue(bundle.metadata.aws_region) ?? request.aws_region;
+    const parameterOverrides = parameterOverrideArgs(bundle.metadata);
     const plan = [
       { command: "sam", args: ["validate", "--template-file", bundle.cloudformationTemplate.filename] },
       {
@@ -179,7 +192,8 @@ export class DeploymentExecutor {
           "CAPABILITY_IAM",
           "CAPABILITY_NAMED_IAM",
           "--no-confirm-changeset",
-          "--no-fail-on-empty-changeset"
+          "--no-fail-on-empty-changeset",
+          ...parameterOverrides
         ]
       }
     ];
@@ -277,6 +291,83 @@ function extractOidcId(value: string): string | undefined {
   const trimmed = value.trim();
   const match = trimmed.match(/\/id\/([A-Za-z0-9_-]+)/);
   return match?.[1];
+}
+
+function parameterOverrideArgs(metadata: Record<string, unknown>): string[] {
+  const raw = metadata.cloudformation_parameters;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+
+  const overrides: string[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const parameter = item as Record<string, unknown>;
+    const key = stringValue(parameter.ParameterKey);
+    const value = stringValue(parameter.ParameterValue);
+    if (!key || value === undefined) continue;
+    if (!/^[A-Za-z0-9]+$/.test(key)) {
+      throw new Error(`Unsafe CloudFormation parameter key: ${key}`);
+    }
+    overrides.push(`${key}=${value}`);
+  }
+
+  return overrides.length > 0 ? ["--parameter-overrides", ...overrides] : [];
+}
+
+function normalizeCloudFormationTemplate(content: string): { content: string; changed: boolean; summary: string } {
+  const lines = content.split(/\r?\n/);
+  const output: string[] = [];
+  let removedSections = 0;
+
+  for (let index = 0; index < lines.length;) {
+    const resourceMatch = lines[index].match(/^  ([A-Za-z0-9]+):\s*$/);
+    if (!resourceMatch) {
+      output.push(lines[index]);
+      index += 1;
+      continue;
+    }
+
+    const blockStart = index;
+    index += 1;
+    while (index < lines.length && !/^  [A-Za-z0-9]+:\s*$/.test(lines[index])) {
+      index += 1;
+    }
+    const block = lines.slice(blockStart, index);
+    if (!block.some((line) => /^\s{4}Type:\s*AWS::EC2::SecurityGroup\s*$/.test(line))) {
+      output.push(...block);
+      continue;
+    }
+
+    const normalizedBlock: string[] = [];
+    for (let blockIndex = 0; blockIndex < block.length;) {
+      if (/^\s{6}SecurityGroupIngress:\s*$/.test(block[blockIndex])) {
+        const sectionStart = blockIndex;
+        blockIndex += 1;
+        while (blockIndex < block.length && !/^\s{6}[A-Za-z0-9]+:\s*/.test(block[blockIndex])) {
+          blockIndex += 1;
+        }
+        const section = block.slice(sectionStart, blockIndex);
+        if (section.some((line) => line.includes("SourceSecurityGroupId:"))) {
+          removedSections += 1;
+          continue;
+        }
+        normalizedBlock.push(...section);
+        continue;
+      }
+
+      normalizedBlock.push(block[blockIndex]);
+      blockIndex += 1;
+    }
+
+    output.push(...normalizedBlock);
+  }
+
+  return {
+    content: output.join("\n"),
+    changed: removedSections > 0,
+    summary: removedSections > 0
+      ? `Removed ${removedSections} inline SecurityGroupIngress section(s) with SourceSecurityGroupId from AWS::EC2::SecurityGroup resources to avoid CloudFormation circular dependencies.`
+      : "No CloudFormation normalization required."
+  };
 }
 
 function formatCommand(command: string, args: string[]): string {
