@@ -88,6 +88,9 @@ AWS_ACCOUNT_ALIAS=demo
 DEFAULT_AWS_REGION=us-east-1
 PUBLIC_BASE_URL=https://<railway-domain>
 OAUTH_LOGIN_PASSWORD=<password-you-enter-during-chatgpt-oauth-linking>
+AWS_ACCESS_KEY_ID=<aws-access-key-id>
+AWS_SECRET_ACCESS_KEY=<aws-secret-access-key>
+AWS_REGION=us-east-1
 ```
 
 Optional polling variables:
@@ -100,4 +103,8 @@ DEFAULT_CLUSTER_NAME=hello-world-demo
 DEFAULT_NAMESPACE=hello-world
 DEFAULT_BUDGET_LIMIT_USD=100
 OAUTH_ACCESS_TOKEN_TTL_SECONDS=86400
+AWS_SESSION_TOKEN=<optional-session-token>
+EXECUTOR_COMMAND_TIMEOUT_MS=900000
 ```
+
+Railway uses the checked-in `Dockerfile` so the runtime image contains Node 22, AWS CLI, AWS SAM CLI, kubectl, bash, and Python. Bodhi generates deployment artifacts only; this MCP service validates those artifacts and executes fixed AWS/SAM/kubectl commands.

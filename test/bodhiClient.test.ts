@@ -17,7 +17,8 @@ const config: Config = {
   bodhiTimeoutMs: 1000,
   publicBaseUrl: "https://mcp.example",
   oauthLoginPassword: "oauth-password",
-  oauthAccessTokenTtlSeconds: 3600
+  oauthAccessTokenTtlSeconds: 3600,
+  executorCommandTimeoutMs: 1000
 };
 
 const request: DeployRequest = {
@@ -101,6 +102,91 @@ describe("BodhiClient", () => {
     expect(result.application_url).toBe("https://app.example.com");
     expect(result.estimated_monthly_cost_usd).toBe(42);
     expect(calls.some((call) => call.url.endsWith("/tasks/task-id/runs"))).toBe(true);
+  });
+
+  it("executes Bodhi-generated artifact bundles through the constrained executor", async () => {
+    let hitlPollCount = 0;
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      if (String(url).endsWith("/tasks/task-id/runs") && init?.method === "POST") {
+        return json({ id: "run-artifacts" });
+      }
+
+      if (String(url).endsWith("/tasks/runs/run-artifacts/hitltasks") && init?.method !== "POST") {
+        hitlPollCount += 1;
+        return json({
+          hitltasks: [
+            {
+              id: hitlPollCount === 1 ? "hitl-request" : "hitl-confirm",
+              status: "pending"
+            }
+          ]
+        });
+      }
+
+      if (String(url).endsWith("/tasks/runs/run-artifacts/hitltasks") && init?.method === "POST") {
+        return json({ ok: true });
+      }
+
+      if (String(url).endsWith("/tasks/task-id/runs/run-artifacts")) {
+        return json({
+          status: "completed",
+          result: {
+            status: "artifacts_ready",
+            deployment_plan: ["Validate", "Deploy"],
+            deployment_artifacts: [
+              {
+                type: "cloudformation_template",
+                filename: "template.yaml",
+                content: "Resources: {}\n"
+              },
+              {
+                type: "metadata",
+                filename: "params.json",
+                content: JSON.stringify({
+                  stack_name: "hello-world-dev",
+                  cluster_name: "hello-world-demo",
+                  namespace: "hello-world",
+                  aws_region: "us-east-1",
+                  application_url: "https://artifact.example.com"
+                })
+              }
+            ],
+            estimated_monthly_cost_usd: 25,
+            cost_notes: "Development estimate",
+            security_notes: "No secrets in artifacts"
+          }
+        });
+      }
+
+      return json({ error: "unexpected" }, 404);
+    };
+
+    const executor = {
+      execute: async () => ({
+        status: "deployed" as const,
+        workspace: "/tmp/workspace",
+        application_url: "https://artifact.example.com",
+        logs_summary: "OK: sam validate\nOK: sam deploy",
+        commands: [
+          {
+            command: "sam validate --template-file template.yaml",
+            exitCode: 0,
+            stdout: "valid",
+            stderr: ""
+          }
+        ]
+      })
+    };
+
+    const client = new BodhiClient(config, fetchImpl as typeof fetch, executor);
+    const result = await client.deployHelloWorld(request);
+
+    expect(result.status).toBe("deployed");
+    expect(result.application_url).toBe("https://artifact.example.com");
+    expect(result.executor_status).toBe("deployed");
+    expect(result.deployment_plan).toEqual(["Validate", "Deploy"]);
+    expect(result.cost_notes).toBe("Development estimate");
+    expect(result.executor_logs?.[0].command).toContain("sam validate");
   });
 });
 

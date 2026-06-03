@@ -13,6 +13,7 @@ export type Config = {
   publicBaseUrl?: string;
   oauthLoginPassword: string;
   oauthAccessTokenTtlSeconds: number;
+  executorCommandTimeoutMs: number;
 };
 
 function required(name: string): string {
@@ -48,6 +49,7 @@ export function loadConfig(): Config {
     bodhiTimeoutMs: numberFromEnv("BODHI_TIMEOUT_MS", 1800000),
     publicBaseUrl: process.env.PUBLIC_BASE_URL?.replace(/\/+$/, ""),
     oauthLoginPassword: process.env.OAUTH_LOGIN_PASSWORD ?? required("MCP_SHARED_SECRET"),
-    oauthAccessTokenTtlSeconds: numberFromEnv("OAUTH_ACCESS_TOKEN_TTL_SECONDS", 86400)
+    oauthAccessTokenTtlSeconds: numberFromEnv("OAUTH_ACCESS_TOKEN_TTL_SECONDS", 86400),
+    executorCommandTimeoutMs: numberFromEnv("EXECUTOR_COMMAND_TIMEOUT_MS", 900000)
   };
 }

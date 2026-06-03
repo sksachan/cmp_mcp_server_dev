@@ -28,6 +28,17 @@ export const DeploymentResultSchema = z.object({
   stack_names: z.array(z.string()).optional(),
   estimated_monthly_cost_usd: z.number().optional(),
   logs_summary: z.string().optional(),
+  deployment_plan: z.array(z.string()).optional(),
+  cost_notes: z.string().optional(),
+  security_notes: z.string().optional(),
+  next_steps: z.array(z.string()).optional(),
+  executor_status: z.string().optional(),
+  executor_logs: z.array(z.object({
+    command: z.string(),
+    exitCode: z.number(),
+    stdout: z.string(),
+    stderr: z.string()
+  })).optional(),
   raw_bodhi_result: z.unknown()
 });
 

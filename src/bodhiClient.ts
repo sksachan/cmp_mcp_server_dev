@@ -1,5 +1,7 @@
 import type { Config } from "./config.js";
 import type { DeployRequest, DeploymentResult } from "./schemas.js";
+import { parseArtifactBundle, validateArtifactBundle } from "./artifacts.js";
+import { DeploymentExecutor } from "./deploymentExecutor.js";
 
 type Fetch = typeof fetch;
 
@@ -25,10 +27,12 @@ const FINAL_STATUSES = new Set(["completed", "finished", "done", "failed", "erro
 export class BodhiClient {
   private readonly config: Config;
   private readonly fetchImpl: Fetch;
+  private readonly executor: Pick<DeploymentExecutor, "execute">;
 
-  constructor(config: Config, fetchImpl: Fetch = fetch) {
+  constructor(config: Config, fetchImpl: Fetch = fetch, executor: Pick<DeploymentExecutor, "execute"> = new DeploymentExecutor(config)) {
     this.config = config;
     this.fetchImpl = fetchImpl;
+    this.executor = executor;
   }
 
   async deployHelloWorld(request: DeployRequest): Promise<DeploymentResult> {
@@ -147,11 +151,16 @@ export class BodhiClient {
     };
   }
 
-  private normalizeResult(runId: string, run: BodhiRun, request: DeployRequest): DeploymentResult {
+  private async normalizeResult(runId: string, run: BodhiRun, request: DeployRequest): Promise<DeploymentResult> {
     const payload = firstObject(run.result, run.output, run.outputs, run);
+    const artifactBundle = parseArtifactBundle(payload);
+
+    if (artifactBundle) {
+      return this.normalizeArtifactResult(runId, run, request, artifactBundle);
+    }
 
     return {
-      status: String(run.status ?? "unknown"),
+      status: stringValue(payload, "status") ?? String(run.status ?? "unknown"),
       run_id: runId,
       application_url: stringValue(payload, "application_url", "app_url", "url"),
       cluster_name: stringValue(payload, "cluster_name") ?? request.cluster_name,
@@ -162,6 +171,34 @@ export class BodhiClient {
       stack_names: stringArrayValue(payload, "stack_names", "stacks"),
       estimated_monthly_cost_usd: numberValue(payload, "estimated_monthly_cost_usd", "estimated_cost_usd", "monthly_cost_usd"),
       logs_summary: stringValue(payload, "logs_summary", "summary"),
+      next_steps: stringArrayValue(payload, "next_steps"),
+      raw_bodhi_result: run
+    };
+  }
+
+  private async normalizeArtifactResult(runId: string, run: BodhiRun, request: DeployRequest, artifactBundle: NonNullable<ReturnType<typeof parseArtifactBundle>>): Promise<DeploymentResult> {
+    const validated = validateArtifactBundle(artifactBundle);
+    const executorResult = await this.executor.execute(validated, request);
+    const metadata = validated.metadata;
+
+    return {
+      status: executorResult.status,
+      run_id: runId,
+      application_url: executorResult.application_url ?? stringValue(metadata, "application_url", "app_url", "url"),
+      cluster_name: stringValue(metadata, "cluster_name") ?? request.cluster_name,
+      namespace: stringValue(metadata, "namespace") ?? request.namespace,
+      aws_region: stringValue(metadata, "aws_region", "region") ?? request.aws_region,
+      ecr_repository: stringValue(metadata, "ecr_repository", "ecr_repo"),
+      load_balancer: stringValue(metadata, "load_balancer", "load_balancer_dns", "alb_dns_name"),
+      stack_names: stringArrayValue(metadata, "stack_names", "stacks", "stack_name"),
+      estimated_monthly_cost_usd: numberValue({ estimated_monthly_cost_usd: artifactBundle.estimated_monthly_cost_usd }, "estimated_monthly_cost_usd"),
+      logs_summary: executorResult.logs_summary,
+      deployment_plan: artifactBundle.deployment_plan,
+      cost_notes: artifactBundle.cost_notes,
+      security_notes: artifactBundle.security_notes,
+      next_steps: artifactBundle.next_steps,
+      executor_status: executorResult.status,
+      executor_logs: executorResult.commands,
       raw_bodhi_result: run
     };
   }

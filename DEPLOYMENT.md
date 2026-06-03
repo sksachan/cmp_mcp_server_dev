@@ -15,7 +15,7 @@ BODHI_WORKFLOW_ID=8598b371-272b-44ca-b7c9-3ff772e96477
 BODHI_TASK_ID=9664fd27-c7e6-4595-963e-c04c6ecd59e8
 ```
 
-Bodhi must have access to the AWS credentials/profile that can run AWS SAM CLI, create or update EKS/ECR/IAM/networking resources, and deploy Kubernetes manifests.
+Bodhi must not run AWS/SAM/kubectl commands. It generates YAML/JSON deployment artifacts only. Railway runs AWS/SAM/kubectl through the MCP executor.
 
 ## 2. GitHub
 
@@ -45,7 +45,8 @@ Settings:
 ```text
 Root Directory: empty if MCP_Server contents are repo root; otherwise MCP_Server
 Config File: default railway.json if MCP_Server contents are repo root; otherwise /MCP_Server/railway.json
-Build Command: npm ci --include=dev && npm run build
+Builder: Dockerfile
+Dockerfile Path: Dockerfile
 Start Command: npm start
 Healthcheck Path: /health
 Public Networking: Enabled
@@ -75,9 +76,16 @@ DEFAULT_BUDGET_LIMIT_USD=100
 BODHI_HITL_POLL_INTERVAL_MS=3000
 BODHI_RUN_POLL_INTERVAL_MS=20000
 BODHI_TIMEOUT_MS=1800000
+AWS_ACCESS_KEY_ID=<aws-access-key-id>
+AWS_SECRET_ACCESS_KEY=<aws-secret-access-key>
+AWS_SESSION_TOKEN=<optional-session-token>
+AWS_REGION=us-east-1
+EXECUTOR_COMMAND_TIMEOUT_MS=900000
 ```
 
 Railway normally provides `PORT`; do not hard-code it unless the Railway project requires it.
+
+The Dockerfile installs AWS CLI, AWS SAM CLI, kubectl, bash, and Python. The MCP executor rejects arbitrary commands from Bodhi and only runs fixed deployment commands against validated artifacts.
 
 ## 4. ChatGPT Connector
 

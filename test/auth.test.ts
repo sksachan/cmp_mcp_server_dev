@@ -21,7 +21,8 @@ const config: Config = {
   bodhiRunPollIntervalMs: 1,
   bodhiTimeoutMs: 1000,
   oauthLoginPassword: "oauth-password",
-  oauthAccessTokenTtlSeconds: 3600
+  oauthAccessTokenTtlSeconds: 3600,
+  executorCommandTimeoutMs: 1000
 };
 
 const oauthService = new OAuthService(config);
