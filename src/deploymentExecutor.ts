@@ -188,8 +188,7 @@ export class DeploymentExecutor {
 
       await this.run(commands, "kubectl", ["get", "pods", "-n", namespace, "-o", "wide"], workspace, env);
       await this.run(commands, "kubectl", ["get", "svc", serviceName, "-n", namespace, "-o", "json"], workspace, env);
-      const hostname = await this.run(commands, "kubectl", ["get", "svc", serviceName, "-n", namespace, "-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}"], workspace, env);
-      const serviceHostname = hostname.exitCode === 0 && hostname.stdout.trim() ? hostname.stdout.trim() : undefined;
+      const serviceHostname = await this.pollServiceHostname(commands, workspace, env, serviceName, namespace);
       const context = baseContext(workspace, commands, stackName, clusterName, namespace, appName, region, outputs, cloudformationStatus, bundle.metadata);
 
       if (!serviceHostname) {
@@ -427,6 +426,16 @@ export class DeploymentExecutor {
       };
     }
   }
+
+  private async pollServiceHostname(commands: CommandResult[], workspace: string, env: NodeJS.ProcessEnv, serviceName: string, namespace: string): Promise<string | undefined> {
+    const attempts = process.env.NODE_ENV === "test" ? 1 : 30;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const hostname = await this.run(commands, "kubectl", ["get", "svc", serviceName, "-n", namespace, "-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}"], workspace, env);
+      if (hostname.exitCode === 0 && hostname.stdout.trim()) return hostname.stdout.trim();
+      if (attempt < attempts - 1) await sleep(10000);
+    }
+    return undefined;
+  }
 }
 
 export async function runCommand(command: string, args: string[], options: { cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv }): Promise<CommandResult> {
@@ -639,8 +648,34 @@ export function applyPublicHelloWorldImageOverride(manifest: string): string {
   }
 
   const updated = output.join("\n");
-  if (!insertedPullPolicy || updated.includes("imagePullPolicy: IfNotPresent")) return updated;
-  return updated;
+  const withServiceAnnotation = ensureEksNlbServiceAnnotation(updated);
+  if (!insertedPullPolicy || withServiceAnnotation.includes("imagePullPolicy: IfNotPresent")) return withServiceAnnotation;
+  return withServiceAnnotation;
+}
+
+function ensureEksNlbServiceAnnotation(manifest: string): string {
+  const docs = manifest.split(/(?=^---\s*$)/m);
+  return docs.map((doc) => {
+    if (!/^\s*kind:\s*Service\s*$/m.test(doc) || !/^\s*type:\s*LoadBalancer\s*$/m.test(doc)) return doc;
+    if (/service\.beta\.kubernetes\.io\/aws-load-balancer-type:\s*["']?nlb["']?/m.test(doc)) return doc;
+    if (/service\.beta\.kubernetes\.io\/aws-load-balancer-type:\s*.+/m.test(doc)) {
+      return doc.replace(/^(\s*)service\.beta\.kubernetes\.io\/aws-load-balancer-type:\s*.+$/m, '$1service.beta.kubernetes.io/aws-load-balancer-type: "nlb"');
+    }
+    const lines = doc.split(/\r?\n/);
+    const metadataIndex = lines.findIndex((line) => /^\s*metadata:\s*$/.test(line));
+    if (metadataIndex === -1) return doc;
+    const metadataIndent = leadingSpaces(lines[metadataIndex]);
+    const childIndent = " ".repeat(metadataIndent + 2);
+    const annotationsIndex = lines.findIndex((line, index) => index > metadataIndex && leadingSpaces(line) === metadataIndent + 2 && /^\s*annotations:\s*$/.test(line));
+    if (annotationsIndex !== -1) {
+      lines.splice(annotationsIndex + 1, 0, `${childIndent}  service.beta.kubernetes.io/aws-load-balancer-type: "nlb"`);
+      return lines.join("\n");
+    }
+    let insertAt = metadataIndex + 1;
+    while (insertAt < lines.length && (lines[insertAt].trim() === "" || leadingSpaces(lines[insertAt]) > metadataIndent)) insertAt += 1;
+    lines.splice(insertAt, 0, `${childIndent}annotations:`, `${childIndent}  service.beta.kubernetes.io/aws-load-balancer-type: "nlb"`);
+    return lines.join("\n");
+  }).join("");
 }
 
 export function validateRenderedKubernetesManifest(manifest: string): string | undefined {
@@ -685,6 +720,10 @@ function extractKubernetesName(manifest: string, kind: string): string | undefin
 
 function formatCommand(command: string, args: string[]): string {
   return [command, ...args].join(" ");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function stringValue(value: unknown): string | undefined {

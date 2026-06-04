@@ -91,6 +91,7 @@ describe("DeploymentExecutor", () => {
     expect(once).not.toContain("containerPort: 808080");
     expect(once).toContain("      port: 80");
     expect(once).toContain("targetPort: http");
+    expect(once).toContain('service.beta.kubernetes.io/aws-load-balancer-type: "nlb"');
     expect(once.match(/port: http/g)?.length).toBe(2);
     expect(validateRenderedKubernetesManifest(once)).toBeUndefined();
   });

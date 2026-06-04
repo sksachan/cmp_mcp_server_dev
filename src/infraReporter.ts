@@ -68,7 +68,7 @@ export class InfraReporter {
     const networking = await this.discoverNetworking(input, env, warnings, vpcId);
     const eks = await this.discoverEks(input, env, warnings);
     const ecr = await this.discoverEcr(input, env, warnings, outputs.ECRRepositoryUri, stackResources);
-    const kubernetes = await this.discoverKubernetes(input, env, warnings, vpcId);
+    const kubernetes = await this.discoverKubernetes(input, env, warnings, vpcId, networking);
     const service = kubernetes.service as Record<string, unknown> | undefined;
     const applicationUrl = stringValue(service, "application_url");
     const costEstimate = estimateCost({
@@ -214,7 +214,7 @@ export class InfraReporter {
     };
   }
 
-  private async discoverKubernetes(input: InfraReportInput, env: NodeJS.ProcessEnv, warnings: string[], vpcId?: string): Promise<Record<string, unknown>> {
+  private async discoverKubernetes(input: InfraReportInput, env: NodeJS.ProcessEnv, warnings: string[], vpcId?: string, networking?: Record<string, unknown>): Promise<Record<string, unknown>> {
     const diagnostics: KubernetesDiscoveryDiagnostics = {
       kubeconfig_updated: false,
       attempted_context_cluster: input.clusterName,
@@ -254,7 +254,7 @@ export class InfraReporter {
       protocol: port.protocol
     })) : [];
     const loadBalancerDiagnostics = service.spec?.type === "LoadBalancer"
-      ? await this.discoverLoadBalancerDiagnostics(input, env, warnings, service, pods ?? [], vpcId)
+      ? await this.discoverLoadBalancerDiagnostics(input, env, warnings, service, pods ?? [], vpcId, networking)
       : undefined;
     const diagnosticHostname = stringValue(loadBalancerDiagnostics as Record<string, unknown> | undefined, "fallback_hostname");
     const effectiveHostname = hostname ?? diagnosticHostname;
@@ -289,7 +289,7 @@ export class InfraReporter {
     };
   }
 
-  private async discoverLoadBalancerDiagnostics(input: InfraReportInput, env: NodeJS.ProcessEnv, warnings: string[], service: Record<string, any>, pods: Record<string, unknown>[], vpcId?: string): Promise<Record<string, unknown>> {
+  private async discoverLoadBalancerDiagnostics(input: InfraReportInput, env: NodeJS.ProcessEnv, warnings: string[], service: Record<string, any>, pods: Record<string, unknown>[], vpcId?: string, networking?: Record<string, unknown>): Promise<Record<string, unknown>> {
     const serviceName = String(service.metadata?.name ?? input.appName);
     const describe = await this.run("kubectl", ["describe", "svc", serviceName, "-n", input.namespace], env);
     const eventsData = await this.readKubectlJson("service events", ["get", "events", "-n", input.namespace, "--sort-by=.lastTimestamp", "-o", "json"], env, warnings);
@@ -306,6 +306,7 @@ export class InfraReporter {
       namespace: input.namespace,
       vpcId
     });
+    const subnetTagDiagnosis = diagnoseSubnetTags(networking, input.clusterName);
     const fallbackHostname = serviceStatusObject.status?.loadBalancer?.ingress?.[0]?.hostname
       ?? awsLoadBalancers.find((lb) => typeof lb.dns_name === "string")?.dns_name;
     const diagnosis = diagnoseLoadBalancer({
@@ -313,7 +314,8 @@ export class InfraReporter {
       kubernetesHostname: service.status?.loadBalancer?.ingress?.[0]?.hostname,
       serviceEvents,
       endpoints,
-      awsLoadBalancers
+      awsLoadBalancers,
+      subnetTagDiagnosis
     });
     if (!service.status?.loadBalancer?.ingress?.[0]?.hostname && fallbackHostname) {
       warnings.push("AWS load balancer DNS was discovered before Kubernetes service status reported ingress.");
@@ -344,7 +346,9 @@ export class InfraReporter {
         pods_wide_summary: podsWide.exitCode === 0 ? summarizeText(podsWide.stdout) : shortError(podsWide)
       },
       aws_load_balancers: awsLoadBalancers,
-      diagnosis
+      subnet_tag_diagnostics: subnetTagDiagnosis,
+      diagnosis,
+      recommended_fix: recommendedLoadBalancerFixes(diagnosis, subnetTagDiagnosis)
     };
   }
 
@@ -600,12 +604,17 @@ function outputMap(outputs: unknown): Record<string, string> {
 }
 
 function summarizeSubnet(subnet: Record<string, any>): Record<string, unknown> {
+  const tags = tagMap(subnet.Tags);
   return {
     subnet_id: subnet.SubnetId,
     cidr: subnet.CidrBlock,
     availability_zone: subnet.AvailabilityZone,
     map_public_ip_on_launch: subnet.MapPublicIpOnLaunch,
-    name: tagName(subnet.Tags),
+    name: tags.Name,
+    tags,
+    cluster_tag: tags[Object.keys(tags).find((key) => key.startsWith("kubernetes.io/cluster/")) ?? ""],
+    elb_role_tag: tags["kubernetes.io/role/elb"],
+    internal_elb_role_tag: tags["kubernetes.io/role/internal-elb"],
     state: subnet.State
   };
 }
@@ -693,9 +702,11 @@ function diagnoseLoadBalancer(input: {
   serviceEvents: Array<Record<string, unknown>>;
   endpoints: Record<string, unknown>;
   awsLoadBalancers: Array<Record<string, unknown>>;
+  subnetTagDiagnosis?: Record<string, unknown>;
 }): string {
   if (input.kubernetesHostname) return "Kubernetes service status has a LoadBalancer hostname.";
   if (input.hostname) return "AWS load balancer exists but Kubernetes service status has not been updated.";
+  if (input.subnetTagDiagnosis?.external_load_balancer_tags_ok === false) return "AWS load balancer provisioning failed due to subnet tag/discovery issue.";
   const eventText = input.serviceEvents.map((event) => `${event.reason ?? ""} ${event.message ?? ""}`).join("\n").toLowerCase();
   if (/(subnet|tag|permission|accessdenied|unauthorized|not authorized|iam)/.test(eventText)) {
     const warning = input.serviceEvents.find((event) => String(event.type).toLowerCase() === "warning") ?? input.serviceEvents[0];
@@ -708,6 +719,33 @@ function diagnoseLoadBalancer(input: {
   }
   if (input.awsLoadBalancers.length === 0) return "No AWS load balancer found for service; inspect service events and cloud-controller-manager permissions.";
   return "AWS cloud provider did not assign a load balancer; check subnet tags, IAM permissions, and service annotations.";
+}
+
+function diagnoseSubnetTags(networking: Record<string, unknown> | undefined, clusterName: string): Record<string, unknown> {
+  const publicSubnets = Array.isArray(networking?.public_subnets) ? networking.public_subnets as Record<string, any>[] : [];
+  const privateSubnets = Array.isArray(networking?.private_subnets) ? networking.private_subnets as Record<string, any>[] : [];
+  const clusterTag = `kubernetes.io/cluster/${clusterName}`;
+  const publicMissing = publicSubnets.filter((subnet) => subnet.tags?.["kubernetes.io/role/elb"] !== "1" || !subnet.tags?.[clusterTag]).map((subnet) => subnet.subnet_id).filter(Boolean);
+  const privateMissing = privateSubnets.filter((subnet) => subnet.tags?.["kubernetes.io/role/internal-elb"] !== "1" || !subnet.tags?.[clusterTag]).map((subnet) => subnet.subnet_id).filter(Boolean);
+  return {
+    required_public_tags: [clusterTag, "kubernetes.io/role/elb"],
+    required_private_tags: [clusterTag, "kubernetes.io/role/internal-elb"],
+    public_subnets_missing_external_lb_tags: publicMissing,
+    private_subnets_missing_internal_lb_tags: privateMissing,
+    external_load_balancer_tags_ok: publicSubnets.length > 0 && publicMissing.length === 0
+  };
+}
+
+function recommendedLoadBalancerFixes(diagnosis: string, subnetTagDiagnosis?: Record<string, unknown>): string[] {
+  const fixes = [];
+  if (subnetTagDiagnosis?.external_load_balancer_tags_ok === false) {
+    fixes.push("Tag public subnets with kubernetes.io/role/elb=1 and kubernetes.io/cluster/<cluster_name>=shared or owned.");
+  }
+  if (/IAM|permission/i.test(diagnosis)) fixes.push("Verify the EKS cluster IAM role has permissions for Elastic Load Balancing and related EC2 security group operations.");
+  if (/no ready endpoints|pod labels/i.test(diagnosis)) fixes.push("Verify the Service selector matches the Deployment pod labels and pods are Ready.");
+  fixes.push("Ensure the Service includes service.beta.kubernetes.io/aws-load-balancer-type: nlb, then reapply the manifest.");
+  fixes.push("Retry execute_hello_world_eks_deployment with update_existing=true and force_retry=true to reapply the corrected Service.");
+  return Array.from(new Set(fixes));
 }
 
 function labelSelector(labels: unknown): string | undefined {
@@ -795,6 +833,15 @@ function repositoryFromResources(resources: StackResource[]): string | undefined
 function tagName(tags: unknown): string | undefined {
   if (!Array.isArray(tags)) return undefined;
   return tags.find((tag) => tag.Key === "Name")?.Value;
+}
+
+function tagMap(tags: unknown): Record<string, string> {
+  if (!Array.isArray(tags)) return {};
+  const out: Record<string, string> = {};
+  for (const tag of tags) {
+    if (typeof tag?.Key === "string" && typeof tag?.Value === "string") out[tag.Key] = tag.Value;
+  }
+  return out;
 }
 
 function shortError(result: CommandResult): string {

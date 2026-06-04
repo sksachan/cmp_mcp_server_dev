@@ -298,6 +298,34 @@ describe("InfraReporter", () => {
     expect(JSON.stringify(report.kubernetes.kubernetes_discovery)).toContain("context deadline exceeded");
   });
 
+  it("reports missing public subnet tags in LoadBalancer diagnostics", async () => {
+    const reporter = new InfraReporter((command, args) => jsonCommand(command, args, { omitHostname: true, missingSubnetTags: true }));
+    const report = await reporter.buildReport({
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+    const projection = buildDevopsReportProjection(report, {
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+
+    expect(projection.load_balancer_diagnostics).toMatchObject({
+      diagnosis: "AWS load balancer provisioning failed due to subnet tag/discovery issue.",
+      subnet_tag_diagnostics: {
+        external_load_balancer_tags_ok: false,
+        public_subnets_missing_external_lb_tags: ["subnet-1"]
+      }
+    });
+    expect(JSON.stringify(projection.load_balancer_diagnostics)).toContain("kubernetes.io/role/elb=1");
+  });
+
+
   it("uses realistic POC cost assumptions and warnings", () => {
     const estimate = estimateCost({
       nodegroups: [{ instance_types: ["t3.small"], desired_size: 1 }],
@@ -319,6 +347,7 @@ function jsonCommand(command: string, args: string[], options: {
   singleLoadBalancerFallback?: boolean;
   awsLoadBalancerFallback?: boolean;
   emptyAppPods?: boolean;
+  missingSubnetTags?: boolean;
 } = {}): Promise<CommandResult> {
   const key = [command, ...args].join(" ");
   if (key.includes("cloudformation describe-stacks")) {
@@ -347,7 +376,20 @@ function jsonCommand(command: string, args: string[], options: {
     })));
   }
   if (key.includes("ec2 describe-vpcs")) return Promise.resolve(result(command, args, 0, JSON.stringify({ Vpcs: [{ VpcId: "vpc-123", CidrBlock: "10.0.0.0/16" }] })));
-  if (key.includes("ec2 describe-subnets")) return Promise.resolve(result(command, args, 0, JSON.stringify({ Subnets: [{ SubnetId: "subnet-1", CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", MapPublicIpOnLaunch: true, State: "available" }] })));
+  if (key.includes("ec2 describe-subnets")) return Promise.resolve(result(command, args, 0, JSON.stringify({
+    Subnets: [{
+      SubnetId: "subnet-1",
+      CidrBlock: "10.0.1.0/24",
+      AvailabilityZone: "us-east-1a",
+      MapPublicIpOnLaunch: true,
+      State: "available",
+      Tags: options.missingSubnetTags ? [] : [
+        { Key: "Name", Value: "public-a" },
+        { Key: "kubernetes.io/cluster/hello-world-demo-v2", Value: "shared" },
+        { Key: "kubernetes.io/role/elb", Value: "1" }
+      ]
+    }]
+  })));
   if (key.includes("ec2 describe-internet-gateways")) return Promise.resolve(result(command, args, 0, JSON.stringify({ InternetGateways: [{ InternetGatewayId: "igw-123" }] })));
   if (key.includes("ec2 describe-nat-gateways")) return Promise.resolve(result(command, args, 0, JSON.stringify({ NatGateways: [{ NatGatewayId: "nat-123" }] })));
   if (key.includes("ec2 describe-route-tables")) return Promise.resolve(result(command, args, 0, JSON.stringify({ RouteTables: [{ RouteTableId: "rtb-123" }] })));
