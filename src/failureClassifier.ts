@@ -12,7 +12,9 @@ export function classifyCommandFailure(
   context: { stackName: string; region: string; stage?: string }
 ): FailureDiagnostic {
   const text = `${result.stdout}\n${result.stderr}`.toLowerCase();
-  const original = `${result.stdout}\n${result.stderr}`;
+  const original = context.stage === "kubectl_apply"
+    ? `${result.stderr}\n${result.stdout}`
+    : `${result.stdout}\n${result.stderr}`;
 
   if (text.includes("rollback_complete")) {
     return rollbackCompleteDiagnostic(context.stackName, context.region, context.stage ?? "cloudformation_deploy", result.command);

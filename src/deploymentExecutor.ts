@@ -155,6 +155,17 @@ export class DeploymentExecutor {
         await writeFile(manifestPath, manifest, "utf8");
         imageMode = "public_nginx_unprivileged";
       }
+      const manifestValidationError = validateRenderedKubernetesManifest(manifest);
+      if (manifestValidationError) {
+        const failure = localFailure("validate rendered Kubernetes manifest", manifestValidationError);
+        commands.push(failure);
+        return failedResult(baseContext(workspace, commands, stackName, clusterName, namespace, appName, region, outputs, cloudformationStatus, bundle.metadata), {
+          failure_stage: "manifest_validation",
+          root_cause: manifestValidationError,
+          remediation: ["Regenerate or patch k8s.yaml so containerPort is a valid port and service targetPort is http."],
+          failed_command: failure.command
+        });
+      }
 
       const updateKubeconfig = await this.run(commands, "aws", ["eks", "update-kubeconfig", "--name", clusterName, "--region", region], workspace, env);
       if (updateKubeconfig.exitCode !== 0) return failedResult(baseContext(workspace, commands, stackName, clusterName, namespace, appName, region, outputs, cloudformationStatus), classifyCommandFailure(updateKubeconfig, { stackName, region, stage: "eks_update_kubeconfig" }));
@@ -577,18 +588,68 @@ function normalizeCloudFormationTemplate(content: string): { content: string; ch
   };
 }
 
-function applyPublicHelloWorldImageOverride(manifest: string): string {
-  let updated = manifest
-    .replace(/image:\s*(PATCH_ECR_IMAGE_URI|ECR_REPOSITORY_URI_PATCH_TARGET)(:latest)?/g, "image: nginxinc/nginx-unprivileged:alpine")
-    .replace(/image:\s*\S+\.dkr\.ecr\.[^\s]+(:[A-Za-z0-9._-]+)?/g, "image: nginxinc/nginx-unprivileged:alpine")
-    .replace(/imagePullPolicy:\s*Always/g, "imagePullPolicy: IfNotPresent")
-    .replace(/containerPort:\s*80/g, "containerPort: 8080")
-    .replace(/targetPort:\s*80/g, "targetPort: http");
+export function applyPublicHelloWorldImageOverride(manifest: string): string {
+  const lines = manifest.split(/\r?\n/);
+  let probeIndent: number | undefined;
+  let insertedPullPolicy = false;
+  const output: string[] = [];
 
-  if (updated.includes("nginxinc/nginx-unprivileged:alpine") && !updated.includes("imagePullPolicy: IfNotPresent")) {
-    updated = updated.replace(/image:\s*nginxinc\/nginx-unprivileged:alpine/g, "image: nginxinc/nginx-unprivileged:alpine\n          imagePullPolicy: IfNotPresent");
+  for (let index = 0; index < lines.length; index += 1) {
+    let line = lines[index];
+    const indent = leadingSpaces(line);
+    if (probeIndent !== undefined && indent <= probeIndent && line.trim() !== "") probeIndent = undefined;
+    if (/^\s*(readinessProbe|livenessProbe):\s*$/.test(line)) probeIndent = indent;
+
+    const imageMatch = line.match(/^(\s*)image:\s*(\S+)\s*$/);
+    if (imageMatch && shouldUseUnprivilegedImage(imageMatch[2])) {
+      line = `${imageMatch[1]}image: nginxinc/nginx-unprivileged:alpine`;
+      output.push(line);
+      const next = lines[index + 1];
+      if (!next || !/^\s*imagePullPolicy:\s*/.test(next)) {
+        output.push(`${imageMatch[1]}imagePullPolicy: IfNotPresent`);
+        insertedPullPolicy = true;
+      }
+      continue;
+    }
+
+    if (/^(\s*)imagePullPolicy:\s*\S+\s*$/.test(line)) {
+      line = line.replace(/^(\s*)imagePullPolicy:\s*\S+\s*$/, "$1imagePullPolicy: IfNotPresent");
+    } else if (/^(\s*)containerPort:\s*\d+\s*$/.test(line)) {
+      line = line.replace(/^(\s*)containerPort:\s*\d+\s*$/, "$1containerPort: 8080");
+    } else if (/^(\s*)targetPort:\s*(80|8080)\s*$/.test(line)) {
+      line = line.replace(/^(\s*)targetPort:\s*(80|8080)\s*$/, "$1targetPort: http");
+    } else if (probeIndent !== undefined && /^(\s*)port:\s*(80|8080)\s*$/.test(line)) {
+      line = line.replace(/^(\s*)port:\s*(80|8080)\s*$/, "$1port: http");
+    }
+
+    output.push(line);
   }
+
+  const updated = output.join("\n");
+  if (!insertedPullPolicy || updated.includes("imagePullPolicy: IfNotPresent")) return updated;
   return updated;
+}
+
+export function validateRenderedKubernetesManifest(manifest: string): string | undefined {
+  for (const match of manifest.matchAll(/containerPort:\s*([0-9]+)/g)) {
+    const port = Number(match[1]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return `Invalid Kubernetes containerPort ${match[1]}; must be between 1 and 65535.`;
+    }
+  }
+  const malformed = manifest.match(/\b(containerPort|targetPort):\s*(808080|[0-9]{6,})\b/);
+  if (malformed) return `Invalid Kubernetes ${malformed[1]} ${malformed[2]}; rendered manifest contains a malformed port value.`;
+  return undefined;
+}
+
+function shouldUseUnprivilegedImage(image: string): boolean {
+  return /^(PATCH_ECR_IMAGE_URI|ECR_REPOSITORY_URI_PATCH_TARGET)(:latest)?$/.test(image)
+    || /^\S+\.dkr\.ecr\.[^\s]+(:[A-Za-z0-9._-]+)?$/.test(image)
+    || image === "nginxinc/nginx-unprivileged:alpine";
+}
+
+function leadingSpaces(value: string): number {
+  return value.match(/^\s*/)?.[0].length ?? 0;
 }
 
 function determineImageMode(manifest: string): string | undefined {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import { validateArtifactBundle } from "../src/artifacts.js";
-import { DeploymentExecutor } from "../src/deploymentExecutor.js";
+import { applyPublicHelloWorldImageOverride, DeploymentExecutor, validateRenderedKubernetesManifest } from "../src/deploymentExecutor.js";
 import type { Config } from "../src/config.js";
 import type { DeployRequest } from "../src/schemas.js";
 
@@ -43,6 +43,83 @@ const request: DeployRequest = {
 };
 
 describe("DeploymentExecutor", () => {
+  it("applies public nginx patch idempotently without corrupting ports", () => {
+    const manifest = [
+      "apiVersion: apps/v1",
+      "kind: Deployment",
+      "metadata:",
+      "  name: hello-world-v5",
+      "spec:",
+      "  template:",
+      "    spec:",
+      "      containers:",
+      "        - name: hello-world",
+      "          image: PATCH_ECR_IMAGE_URI:latest",
+      "          imagePullPolicy: Always",
+      "          ports:",
+      "            - name: http",
+      "              containerPort: 80",
+      "          readinessProbe:",
+      "            httpGet:",
+      "              path: /",
+      "              port: 80",
+      "          livenessProbe:",
+      "            httpGet:",
+      "              path: /",
+      "              port: 8080",
+      "---",
+      "apiVersion: v1",
+      "kind: Service",
+      "metadata:",
+      "  name: hello-world-v5",
+      "spec:",
+      "  type: LoadBalancer",
+      "  ports:",
+      "    - name: http",
+      "      port: 80",
+      "      targetPort: 80",
+      ""
+    ].join("\n");
+
+    const once = applyPublicHelloWorldImageOverride(manifest);
+    const twice = applyPublicHelloWorldImageOverride(once);
+
+    expect(twice).toBe(once);
+    expect(once).toContain("image: nginxinc/nginx-unprivileged:alpine");
+    expect(once).toContain("imagePullPolicy: IfNotPresent");
+    expect(once).toContain("containerPort: 8080");
+    expect(once).not.toContain("containerPort: 808080");
+    expect(once).toContain("      port: 80");
+    expect(once).toContain("targetPort: http");
+    expect(once.match(/port: http/g)?.length).toBe(2);
+    expect(validateRenderedKubernetesManifest(once)).toBeUndefined();
+  });
+
+  it("leaves existing containerPort 8080 stable and rejects malformed ports", () => {
+    const manifest = [
+      "apiVersion: apps/v1",
+      "kind: Deployment",
+      "metadata:",
+      "  name: hello-world-v5",
+      "spec:",
+      "  template:",
+      "    spec:",
+      "      containers:",
+      "        - name: hello-world",
+      "          image: nginxinc/nginx-unprivileged:alpine",
+      "          ports:",
+      "            - name: http",
+      "              containerPort: 8080",
+      ""
+    ].join("\n");
+
+    const patched = applyPublicHelloWorldImageOverride(applyPublicHelloWorldImageOverride(manifest));
+
+    expect(patched).toContain("containerPort: 8080");
+    expect(patched).not.toContain("808080");
+    expect(validateRenderedKubernetesManifest("containerPort: 808080\n")).toContain("Invalid Kubernetes containerPort 808080");
+  });
+
   it("builds the fixed command plan without arbitrary commands", () => {
     const bundle = validateArtifactBundle({
       status: "artifacts_ready",

@@ -32,4 +32,16 @@ describe("failure classifier", () => {
 
     expect(result.failure_stage).toBe("aws_auth");
   });
+
+  it("uses stderr as root cause for kubectl apply failures", () => {
+    const result = classifyCommandFailure({
+      command: "kubectl apply -f k8s.yaml",
+      exitCode: 1,
+      stdout: "namespace/hello-world-v5 created",
+      stderr: "The Deployment \"hello-world-v5\" is invalid: spec.template.spec.containers[0].ports[0].containerPort: Invalid value: 808080"
+    }, { stackName: "hello-world-v5-dev-eks", region: "us-east-1", stage: "kubectl_apply" });
+
+    expect(result.root_cause).toContain("Invalid value: 808080");
+    expect(result.root_cause).not.toContain("namespace/hello-world-v5 created");
+  });
 });
