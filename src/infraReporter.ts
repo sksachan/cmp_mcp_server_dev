@@ -31,6 +31,7 @@ export type DevopsReportProjection = {
   cost_estimate: Record<string, unknown>;
   validation_checks: Array<Record<string, unknown>>;
   resource_inventory: Record<string, unknown>;
+  load_balancer_diagnostics?: Record<string, unknown>;
 };
 
 type StackResource = {
@@ -67,7 +68,7 @@ export class InfraReporter {
     const networking = await this.discoverNetworking(input, env, warnings, vpcId);
     const eks = await this.discoverEks(input, env, warnings);
     const ecr = await this.discoverEcr(input, env, warnings, outputs.ECRRepositoryUri, stackResources);
-    const kubernetes = await this.discoverKubernetes(input, env, warnings);
+    const kubernetes = await this.discoverKubernetes(input, env, warnings, vpcId);
     const service = kubernetes.service as Record<string, unknown> | undefined;
     const applicationUrl = stringValue(service, "application_url");
     const costEstimate = estimateCost({
@@ -213,7 +214,7 @@ export class InfraReporter {
     };
   }
 
-  private async discoverKubernetes(input: InfraReportInput, env: NodeJS.ProcessEnv, warnings: string[]): Promise<Record<string, unknown>> {
+  private async discoverKubernetes(input: InfraReportInput, env: NodeJS.ProcessEnv, warnings: string[], vpcId?: string): Promise<Record<string, unknown>> {
     const diagnostics: KubernetesDiscoveryDiagnostics = {
       kubeconfig_updated: false,
       attempted_context_cluster: input.clusterName,
@@ -237,7 +238,13 @@ export class InfraReporter {
       || selectSingle(await this.readKubectlJson("service by hello-world label", ["get", "svc", "-n", input.namespace, "-l", "app=hello-world", "-o", "json"], env, warnings, diagnostics))
       || this.warnSingle("LoadBalancer service", selectSingleLoadBalancer(await this.readKubectlJson("single LoadBalancer service", ["get", "svc", "-n", input.namespace, "-o", "json"], env, warnings, diagnostics)), warnings)
       || {};
-    const podsData = await this.readKubectlJson("pods by app label", ["get", "pods", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings, diagnostics);
+    const appPodsData = await this.readKubectlJson("pods by app label", ["get", "pods", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings, diagnostics);
+    const selectorLabels = labelSelector(deployment.spec?.selector?.matchLabels);
+    const podsData = appPodsData && Array.isArray(appPodsData.items) && appPodsData.items.length > 0
+      ? appPodsData
+      : selectorLabels
+        ? await this.readKubectlJson("pods by deployment selector", ["get", "pods", "-n", input.namespace, "-l", selectorLabels, "-o", "json"], env, warnings, diagnostics)
+        : appPodsData;
     const podsDiscovered = Boolean(podsData && Array.isArray(podsData.items));
     const pods = podsDiscovered && podsData ? podsData.items.map(summarizePod) : undefined;
     const hostname = service.status?.loadBalancer?.ingress?.[0]?.hostname;
@@ -246,6 +253,11 @@ export class InfraReporter {
       targetPort: port.targetPort,
       protocol: port.protocol
     })) : [];
+    const loadBalancerDiagnostics = service.spec?.type === "LoadBalancer"
+      ? await this.discoverLoadBalancerDiagnostics(input, env, warnings, service, pods ?? [], vpcId)
+      : undefined;
+    const diagnosticHostname = stringValue(loadBalancerDiagnostics as Record<string, unknown> | undefined, "fallback_hostname");
+    const effectiveHostname = hostname ?? diagnosticHostname;
     const hasDeployment = Boolean(deployment.metadata?.name);
     const hasService = Boolean(service.metadata?.name);
     const kubectlSuccesses = [hasDeployment, podsDiscovered, hasService].filter(Boolean).length;
@@ -262,15 +274,77 @@ export class InfraReporter {
         name: service.metadata?.name,
         type: service.spec?.type,
         selector: service.spec?.selector,
-        hostname,
-        load_balancer_hostname: hostname,
-        application_url: hostname ? `http://${hostname}` : undefined,
-        endpoint_status: hostname ? "ready" : "pending",
-        endpoint_message: hostname ? undefined : "LoadBalancer hostname not yet assigned. Retry in 2-3 minutes.",
+        hostname: effectiveHostname,
+        kubernetes_status_hostname: hostname,
+        load_balancer_hostname: effectiveHostname,
+        application_url: effectiveHostname ? `http://${effectiveHostname}` : undefined,
+        endpoint_status: effectiveHostname ? "ready" : "pending",
+        endpoint_source: hostname ? "kubernetes_service_status" : diagnosticHostname ? "aws_elb_discovery" : undefined,
+        endpoint_message: effectiveHostname ? undefined : String((loadBalancerDiagnostics as Record<string, unknown> | undefined)?.diagnosis ?? "LoadBalancer hostname not yet assigned. Retry in 2-3 minutes."),
         ports,
         target_ports: ports.map((port: Record<string, unknown>) => port.targetPort).filter(Boolean)
       },
+      load_balancer_diagnostics: loadBalancerDiagnostics,
       kubernetes_discovery: diagnostics
+    };
+  }
+
+  private async discoverLoadBalancerDiagnostics(input: InfraReportInput, env: NodeJS.ProcessEnv, warnings: string[], service: Record<string, any>, pods: Record<string, unknown>[], vpcId?: string): Promise<Record<string, unknown>> {
+    const serviceName = String(service.metadata?.name ?? input.appName);
+    const describe = await this.run("kubectl", ["describe", "svc", serviceName, "-n", input.namespace], env);
+    const eventsData = await this.readKubectlJson("service events", ["get", "events", "-n", input.namespace, "--sort-by=.lastTimestamp", "-o", "json"], env, warnings);
+    const endpointsData = await this.readKubectlJson("service endpoints", ["get", "endpoints", serviceName, "-n", input.namespace, "-o", "json"], env, warnings);
+    const podsWide = await this.run("kubectl", ["get", "pods", "-n", input.namespace, "-o", "wide", "--show-labels"], env);
+    const serviceStatus = await this.readKubectlJson("service status refresh", ["get", "svc", serviceName, "-n", input.namespace, "-o", "json"], env, warnings);
+    const classicElb = await this.readAwsJson("classic load balancers", ["elb", "describe-load-balancers", "--region", input.region, "--output", "json"], env, warnings);
+    const elbv2 = await this.readAwsJson("ELBv2 load balancers", ["elbv2", "describe-load-balancers", "--region", input.region, "--output", "json"], env, warnings);
+    const serviceStatusObject = serviceStatus && Object.keys(serviceStatus).length > 0 ? serviceStatus : service;
+    const serviceEvents = summarizeEvents(eventsData ?? {}, serviceName);
+    const endpoints = summarizeEndpoints(endpointsData ?? {});
+    const awsLoadBalancers = summarizeLoadBalancers(classicElb, elbv2, {
+      serviceName,
+      namespace: input.namespace,
+      vpcId
+    });
+    const fallbackHostname = serviceStatusObject.status?.loadBalancer?.ingress?.[0]?.hostname
+      ?? awsLoadBalancers.find((lb) => typeof lb.dns_name === "string")?.dns_name;
+    const diagnosis = diagnoseLoadBalancer({
+      hostname: fallbackHostname,
+      kubernetesHostname: service.status?.loadBalancer?.ingress?.[0]?.hostname,
+      serviceEvents,
+      endpoints,
+      awsLoadBalancers
+    });
+    if (!service.status?.loadBalancer?.ingress?.[0]?.hostname && fallbackHostname) {
+      warnings.push("AWS load balancer DNS was discovered before Kubernetes service status reported ingress.");
+    }
+    return {
+      service_name: serviceName,
+      service_type: service.spec?.type,
+      hostname_assigned: Boolean(fallbackHostname),
+      fallback_hostname: fallbackHostname,
+      endpoint_source: service.status?.loadBalancer?.ingress?.[0]?.hostname ? "kubernetes_service_status" : fallbackHostname ? "aws_elb_discovery" : "pending",
+      kubernetes_service_status: {
+        load_balancer_ingress: serviceStatusObject.status?.loadBalancer?.ingress ?? [],
+        external_ip: serviceStatusObject.spec?.externalIPs?.[0] ?? null,
+        ports: Array.isArray(serviceStatusObject.spec?.ports) ? serviceStatusObject.spec.ports.map((port: Record<string, unknown>) => ({
+          port: port.port,
+          targetPort: port.targetPort,
+          protocol: port.protocol
+        })) : [],
+        annotations: serviceStatusObject.metadata?.annotations ?? {},
+        selector: serviceStatusObject.spec?.selector ?? {}
+      },
+      service_events: serviceEvents,
+      endpoints,
+      pods: {
+        running: pods.filter((pod) => pod.phase === "Running").length,
+        ready: pods.filter((pod) => pod.ready === true).length,
+        describe_summary: describe.exitCode === 0 ? summarizeText(describe.stdout) : shortError(describe),
+        pods_wide_summary: podsWide.exitCode === 0 ? summarizeText(podsWide.stdout) : shortError(podsWide)
+      },
+      aws_load_balancers: awsLoadBalancers,
+      diagnosis
     };
   }
 
@@ -348,6 +422,7 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
   budgetTargetUsd?: number;
 }): DevopsReportProjection {
   const service = report.kubernetes.service as Record<string, any> | undefined;
+  const loadBalancerDiagnostics = report.kubernetes.load_balancer_diagnostics as Record<string, any> | undefined;
   const firstPort = Array.isArray(service?.ports) ? service.ports[0] as Record<string, unknown> | undefined : undefined;
   const endpointStatus = service?.hostname ? "ready" : service?.endpoint_status ?? "pending";
   const applicationUrl = service?.application_url ?? (service?.hostname ? `http://${service.hostname}` : null);
@@ -358,6 +433,7 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
   const pods = Array.isArray(kubernetes.pods) ? kubernetes.pods as Record<string, unknown>[] : [];
   const podsDiscovered = kubernetes.pods_discovered === true;
   const podsRunning = podsDiscovered ? pods.filter((pod) => pod.phase === "Running").length : null;
+  const podsReady = podsDiscovered ? pods.filter((pod) => pod.ready === true).length : null;
   const replicasDesired = numberValue(kubernetes.replicas_desired);
   const replicasAvailable = numberValue(kubernetes.replicas_available);
   const rolloutStatus = (replicasDesired ?? 0) > 0 && (replicasAvailable ?? 0) >= (replicasDesired ?? 0) ? "success" : "unknown";
@@ -389,10 +465,13 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
     { check: "EKS cluster", status: eks.cluster_status === "ACTIVE" ? "pass" : "unknown", detail: eks.cluster_status },
     { check: "EKS node group", status: nodegroup.status === "ACTIVE" ? "pass" : "unknown", detail: nodegroup.status ? `${nodegroup.status}, desired ${nodegroup.desired_size ?? "unknown"}` : undefined },
     { check: "Kubernetes rollout", status: rolloutStatus === "success" ? "pass" : "unknown", detail: kubernetes.deployment_name ? `Deployment ${kubernetes.deployment_name} rollout ${rolloutStatus}` : undefined },
-    { check: "LoadBalancer endpoint", status: endpointStatus === "ready" ? "pass" : "pending", detail: endpointStatus === "ready" ? "hostname assigned" : "hostname pending" }
+    { check: "LoadBalancer endpoint", status: endpointStatus === "ready" ? "pass" : "pending", detail: endpointStatus === "ready" ? "hostname assigned" : String(loadBalancerDiagnostics?.diagnosis ?? "hostname pending") },
+    { check: "Service endpoints", status: numberValue(loadBalancerDiagnostics?.endpoints?.ready_addresses) ? "pass" : "warning", detail: `ready addresses: ${numberValue(loadBalancerDiagnostics?.endpoints?.ready_addresses) ?? "unknown"}` },
+    { check: "AWS LoadBalancer discovery", status: endpointStatus === "ready" ? "pass" : loadBalancerDiagnostics?.aws_load_balancers?.length ? "pending" : "fail", detail: loadBalancerDiagnostics?.aws_load_balancers?.length ? `${loadBalancerDiagnostics.aws_load_balancers.length} candidate load balancer(s)` : "no matching AWS load balancer found" }
   ];
   const applicationEndpoint = {
     status: endpointStatus,
+    source: service?.endpoint_source ?? (endpointStatus === "ready" ? "kubernetes_service_status" : undefined),
     service_name: service?.name ?? null,
     service_type: service?.type ?? null,
     hostname: service?.hostname ?? null,
@@ -400,6 +479,7 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
     port: firstPort?.port ?? null,
     target_port: firstPort?.targetPort ?? null,
     validation_command: applicationUrl ? `curl -I ${applicationUrl}` : null,
+    diagnosis: endpointStatus === "ready" ? undefined : loadBalancerDiagnostics?.diagnosis,
     endpoint_message: endpointStatus === "ready" ? undefined : "LoadBalancer hostname not yet assigned. Retry in 2-3 minutes."
   };
   const infraSummary = {
@@ -426,7 +506,8 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
     replicas_desired: replicasDesired,
     replicas_available: replicasAvailable,
     pods_running: podsRunning,
-    pods_not_ready: replicasDesired === undefined || replicasAvailable === undefined ? null : Math.max(replicasDesired - replicasAvailable, 0),
+    pods_ready: podsReady,
+    pods_not_ready: podsDiscovered ? pods.length - (podsReady ?? 0) : null,
     service_name: service?.name,
     service_type: service?.type,
     service_hostname: service?.hostname,
@@ -440,6 +521,7 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
       endpoint_status: endpointStatus
     },
     application_endpoint: applicationEndpoint,
+    load_balancer_diagnostics: loadBalancerDiagnostics,
     aws_identity: {
       account_id: input.awsAccountId,
       region: input.region
@@ -503,7 +585,8 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
     warnings,
     cost_estimate: costEstimate,
     validation_checks: validationChecks,
-    resource_inventory: resourceInventory
+    resource_inventory: resourceInventory,
+    load_balancer_diagnostics: loadBalancerDiagnostics
   };
 }
 
@@ -534,10 +617,113 @@ function summarizePod(pod: Record<string, any>): Record<string, unknown> {
   return {
     name: pod.metadata?.name,
     phase: pod.status?.phase,
+    ready: podReady(pod),
     node: pod.spec?.nodeName,
     pod_ip: pod.status?.podIP,
     restart_count: restarts
   };
+}
+
+function summarizeEvents(eventsData: Record<string, any>, serviceName: string): Array<Record<string, unknown>> {
+  const items = Array.isArray(eventsData.items) ? eventsData.items : [];
+  return items
+    .filter((event) => {
+      const involvedName = event.involvedObject?.name;
+      const message = String(event.message ?? "");
+      return involvedName === serviceName || message.includes(serviceName) || event.involvedObject?.kind === "Service";
+    })
+    .slice(-8)
+    .map((event) => ({
+      type: event.type,
+      reason: event.reason,
+      message: event.message,
+      last_timestamp: event.lastTimestamp ?? event.eventTime ?? event.metadata?.creationTimestamp
+    }));
+}
+
+function summarizeEndpoints(endpointsData: Record<string, any>): Record<string, unknown> {
+  const subsets = Array.isArray(endpointsData.subsets) ? endpointsData.subsets : [];
+  const ready = subsets.reduce((sum, subset) => sum + (Array.isArray(subset.addresses) ? subset.addresses.length : 0), 0);
+  const notReady = subsets.reduce((sum, subset) => sum + (Array.isArray(subset.notReadyAddresses) ? subset.notReadyAddresses.length : 0), 0);
+  const ports = subsets.flatMap((subset) => Array.isArray(subset.ports) ? subset.ports.map((port: Record<string, unknown>) => ({
+    name: port.name,
+    port: port.port,
+    protocol: port.protocol
+  })) : []);
+  return {
+    ready_addresses: ready,
+    not_ready_addresses: notReady,
+    ports
+  };
+}
+
+function summarizeLoadBalancers(classicElb: Record<string, any>, elbv2: Record<string, any>, filter: { serviceName: string; namespace: string; vpcId?: string }): Array<Record<string, unknown>> {
+  const classic = Array.isArray(classicElb.LoadBalancerDescriptions) ? classicElb.LoadBalancerDescriptions.map((lb: Record<string, any>) => ({
+    name: lb.LoadBalancerName,
+    dns_name: lb.DNSName,
+    type: "classic",
+    scheme: lb.Scheme,
+    state: undefined,
+    vpc_id: lb.VPCId,
+    availability_zones: lb.AvailabilityZones
+  })) : [];
+  const v2 = Array.isArray(elbv2.LoadBalancers) ? elbv2.LoadBalancers.map((lb: Record<string, any>) => ({
+    name: lb.LoadBalancerName,
+    dns_name: lb.DNSName,
+    type: lb.Type ?? "unknown",
+    scheme: lb.Scheme,
+    state: lb.State?.Code,
+    vpc_id: lb.VpcId,
+    availability_zones: Array.isArray(lb.AvailabilityZones) ? lb.AvailabilityZones.map((az: Record<string, unknown>) => az.ZoneName).filter(Boolean) : []
+  })) : [];
+  const all = [...classic, ...v2];
+  const serviceTokens = [filter.serviceName, filter.namespace, filter.serviceName.replace(/-/g, "")].filter(Boolean).map((value) => String(value).toLowerCase());
+  const matches = all.filter((lb) => {
+    const name = String(lb.name ?? "").toLowerCase();
+    const dns = String(lb.dns_name ?? "").toLowerCase();
+    return (filter.vpcId && lb.vpc_id === filter.vpcId)
+      || serviceTokens.some((token) => name.includes(token) || dns.includes(token));
+  });
+  return (matches.length > 0 ? matches : all).slice(0, 5);
+}
+
+function diagnoseLoadBalancer(input: {
+  hostname?: string;
+  kubernetesHostname?: string;
+  serviceEvents: Array<Record<string, unknown>>;
+  endpoints: Record<string, unknown>;
+  awsLoadBalancers: Array<Record<string, unknown>>;
+}): string {
+  if (input.kubernetesHostname) return "Kubernetes service status has a LoadBalancer hostname.";
+  if (input.hostname) return "AWS load balancer exists but Kubernetes service status has not been updated.";
+  const eventText = input.serviceEvents.map((event) => `${event.reason ?? ""} ${event.message ?? ""}`).join("\n").toLowerCase();
+  if (/(subnet|tag|permission|accessdenied|unauthorized|not authorized|iam)/.test(eventText)) {
+    const warning = input.serviceEvents.find((event) => String(event.type).toLowerCase() === "warning") ?? input.serviceEvents[0];
+    return `LoadBalancer provisioning is blocked by Kubernetes service event: ${warning?.reason ?? "Warning"} ${warning?.message ?? ""}`.trim();
+  }
+  const readyAddresses = numberValue(input.endpoints.ready_addresses) ?? 0;
+  if (readyAddresses === 0) return "Service has no ready pod endpoints; check pod labels/readiness.";
+  if (/(ensuringloadbalancer|creatingloadbalancer|ensuring load balancer|creating load balancer)/.test(eventText)) {
+    return "AWS load balancer provisioning still in progress.";
+  }
+  if (input.awsLoadBalancers.length === 0) return "No AWS load balancer found for service; inspect service events and cloud-controller-manager permissions.";
+  return "AWS cloud provider did not assign a load balancer; check subnet tags, IAM permissions, and service annotations.";
+}
+
+function labelSelector(labels: unknown): string | undefined {
+  if (!labels || typeof labels !== "object" || Array.isArray(labels)) return undefined;
+  const entries = Object.entries(labels as Record<string, unknown>)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0);
+  return entries.length ? entries.map(([key, value]) => `${key}=${value}`).join(",") : undefined;
+}
+
+function podReady(pod: Record<string, any>): boolean {
+  const conditions = Array.isArray(pod.status?.conditions) ? pod.status.conditions : [];
+  return conditions.some((condition: Record<string, unknown>) => condition.type === "Ready" && condition.status === "True");
+}
+
+function summarizeText(value: string): string {
+  return value.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 12).join("\n").slice(0, 1200);
 }
 
 function parseJsonObject(value: string, label: string, warnings: string[]): Record<string, any> {

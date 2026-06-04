@@ -267,6 +267,7 @@ export class BodhiClient {
       cost_estimate: projection.cost_estimate,
       validation_checks: projection.validation_checks,
       resource_inventory: projection.resource_inventory,
+      load_balancer_diagnostics: projection.load_balancer_diagnostics,
       report_warnings: report.report_warnings,
       infra_report: report as unknown as Record<string, unknown>
     };
@@ -397,6 +398,7 @@ export class BodhiClient {
       cost_estimate: executorResult.cost_estimate,
       validation_checks: executorResult.validation_checks,
       resource_inventory: executorResult.resource_inventory,
+      load_balancer_diagnostics: executorResult.load_balancer_diagnostics,
       report_warnings: executorResult.report_warnings,
       infra_report: executorResult.infra_report as unknown as Record<string, unknown> | undefined,
       executor_logs: executorResult.commands.map((command) => ({

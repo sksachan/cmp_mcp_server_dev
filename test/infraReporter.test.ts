@@ -62,8 +62,14 @@ describe("InfraReporter", () => {
       "EKS cluster",
       "EKS node group",
       "Kubernetes rollout",
-      "LoadBalancer endpoint"
+      "LoadBalancer endpoint",
+      "Service endpoints",
+      "AWS LoadBalancer discovery"
     ]);
+    expect(projection.devops_report.kubernetes).toMatchObject({
+      pods_running: 1,
+      pods_ready: 1
+    });
     expect(JSON.stringify(projection)).not.toContain("SecretAccessKey");
     expect(JSON.stringify(report)).not.toContain("SecretAccessKey");
     expect(commands[commands.findIndex((command) => command.includes("kubectl get deployment")) - 1]).toContain("aws eks update-kubeconfig");
@@ -122,7 +128,75 @@ describe("InfraReporter", () => {
     expect(projection.application_endpoint).toMatchObject({
       status: "pending",
       hostname: null,
-      url: null
+      url: null,
+      diagnosis: "AWS load balancer provisioning still in progress."
+    });
+    expect(projection.load_balancer_diagnostics).toMatchObject({
+      service_name: "hello-world-v2",
+      hostname_assigned: false,
+      diagnosis: "AWS load balancer provisioning still in progress."
+    });
+  });
+
+  it("uses AWS load balancer DNS as endpoint fallback when Kubernetes status is empty", async () => {
+    const reporter = new InfraReporter((command, args) => jsonCommand(command, args, { omitHostname: true, awsLoadBalancerFallback: true }));
+    const report = await reporter.buildReport({
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+    const projection = buildDevopsReportProjection(report, {
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+
+    expect(projection.infra_summary).toMatchObject({
+      service_hostname: "aws-lb.elb.amazonaws.com",
+      application_url: "http://aws-lb.elb.amazonaws.com",
+      endpoint_status: undefined
+    });
+    expect(projection.application_endpoint).toMatchObject({
+      status: "ready",
+      source: "aws_elb_discovery",
+      hostname: "aws-lb.elb.amazonaws.com",
+      url: "http://aws-lb.elb.amazonaws.com"
+    });
+    expect(projection.load_balancer_diagnostics).toMatchObject({
+      diagnosis: "AWS load balancer exists but Kubernetes service status has not been updated."
+    });
+  });
+
+  it("counts pods using deployment selector when app label returns no pods", async () => {
+    const commands: string[] = [];
+    const reporter = new InfraReporter((command, args) => {
+      commands.push([command, ...args].join(" "));
+      return jsonCommand(command, args, { emptyAppPods: true });
+    });
+    const report = await reporter.buildReport({
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+    const projection = buildDevopsReportProjection(report, {
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+
+    expect(commands.some((command) => command.includes("kubectl get pods -n hello-world-v2 -l app.kubernetes.io/name=hello-world-v2"))).toBe(true);
+    expect(projection.devops_report.kubernetes).toMatchObject({
+      pods_running: 1,
+      pods_ready: 1,
+      pods_not_ready: 0
     });
   });
 
@@ -243,6 +317,8 @@ function jsonCommand(command: string, args: string[], options: {
   appSvcMissing?: boolean;
   labelServiceMissing?: boolean;
   singleLoadBalancerFallback?: boolean;
+  awsLoadBalancerFallback?: boolean;
+  emptyAppPods?: boolean;
 } = {}): Promise<CommandResult> {
   const key = [command, ...args].join(" ");
   if (key.includes("cloudformation describe-stacks")) {
@@ -282,8 +358,11 @@ function jsonCommand(command: string, args: string[], options: {
   if (key.includes("eks update-kubeconfig")) return Promise.resolve(result(command, args, 0, "Updated context", ""));
   if (key.includes("ecr describe-repositories")) return Promise.resolve(result(command, args, 0, JSON.stringify({ repositories: [{ repositoryName: "hello-world-v2-dev", repositoryUri: "051370627449.dkr.ecr.us-east-1.amazonaws.com/hello-world-v2-dev", imageScanningConfiguration: { scanOnPush: true }, encryptionConfiguration: { encryptionType: "AES256" } }] })));
   if (key.includes("ecr describe-images")) return Promise.resolve(result(command, args, 0, JSON.stringify({ imageDetails: [] })));
-  if (key.includes("kubectl get deployment")) return Promise.resolve(result(command, args, 0, JSON.stringify({ metadata: { name: "hello-world-v2" }, spec: { replicas: 1, template: { spec: { containers: [{ image: "nginxinc/nginx-unprivileged:alpine" }] } } }, status: { availableReplicas: 1 } })));
-  if (key.includes("kubectl get pods")) return Promise.resolve(result(command, args, 0, JSON.stringify({ items: [{ metadata: { name: "pod-1" }, spec: { nodeName: "node-1" }, status: { phase: "Running", podIP: "10.0.1.10", containerStatuses: [{ restartCount: 0 }] } }] })));
+  if (key.includes("kubectl get deployment")) return Promise.resolve(result(command, args, 0, JSON.stringify({ metadata: { name: "hello-world-v2" }, spec: { replicas: 1, selector: { matchLabels: { "app.kubernetes.io/name": "hello-world-v2" } }, template: { spec: { containers: [{ image: "nginxinc/nginx-unprivileged:alpine" }] } } }, status: { availableReplicas: 1 } })));
+  if (key.includes("kubectl get events")) return Promise.resolve(result(command, args, 0, JSON.stringify({ items: [{ type: "Normal", reason: "EnsuringLoadBalancer", message: "Ensuring load balancer", involvedObject: { kind: "Service", name: "hello-world-v2" }, lastTimestamp: "2026-06-04T10:20:00Z" }] })));
+  if (key.includes("kubectl get endpoints")) return Promise.resolve(result(command, args, 0, JSON.stringify({ subsets: [{ addresses: [{ ip: "10.0.1.10" }], ports: [{ name: "http", port: 8080, protocol: "TCP" }] }] })));
+  if (key.includes("kubectl get pods -n hello-world-v2 -l app=hello-world-v2") && options.emptyAppPods) return Promise.resolve(result(command, args, 0, JSON.stringify({ items: [] })));
+  if (key.includes("kubectl get pods")) return Promise.resolve(result(command, args, 0, JSON.stringify({ items: [{ metadata: { name: "pod-1" }, spec: { nodeName: "node-1" }, status: { phase: "Running", podIP: "10.0.1.10", conditions: [{ type: "Ready", status: "True" }], containerStatuses: [{ restartCount: 0 }] } }] })));
   if (key.includes("kubectl get svc hello-world-v2 ") && options.exactServiceMissing) return Promise.resolve(result(command, args, 1, "", "not found"));
   if (key.includes("kubectl get svc hello-world-v2-svc") && options.appSvcMissing) return Promise.resolve(result(command, args, 1, "", "not found"));
   if (key.includes("kubectl get svc -n hello-world-v2 -l app=hello-world-v2") && options.labelServiceMissing) return Promise.resolve(result(command, args, 0, JSON.stringify({ items: [] })));
@@ -318,6 +397,22 @@ function jsonCommand(command: string, args: string[], options: {
       metadata: { name },
       spec: { type: "LoadBalancer", selector: { app: "hello-world-v2" }, ports: [{ port: 80, targetPort: "http", protocol: "TCP" }] },
       status: { loadBalancer: { ingress: options.omitHostname ? [] : [{ hostname: "abc.elb.amazonaws.com" }] } }
+    })));
+  }
+  if (key.includes("elb describe-load-balancers")) {
+    return Promise.resolve(result(command, args, 0, JSON.stringify({
+      LoadBalancerDescriptions: options.awsLoadBalancerFallback ? [{
+        LoadBalancerName: "k8s-hello-world-v2",
+        DNSName: "aws-lb.elb.amazonaws.com",
+        Scheme: "internet-facing",
+        VPCId: "vpc-123",
+        AvailabilityZones: ["us-east-1a"]
+      }] : []
+    })));
+  }
+  if (key.includes("elbv2 describe-load-balancers")) {
+    return Promise.resolve(result(command, args, 0, JSON.stringify({
+      LoadBalancers: []
     })));
   }
   return Promise.resolve(result(command, args, 0, "{}", ""));

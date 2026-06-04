@@ -102,6 +102,7 @@ export const DeploymentResultSchema = z.object({
   cost_estimate: z.record(z.unknown()).optional(),
   validation_checks: z.array(z.record(z.unknown())).optional(),
   resource_inventory: z.record(z.unknown()).optional(),
+  load_balancer_diagnostics: z.record(z.unknown()).optional(),
   canonical_identity: z.record(z.unknown()).optional(),
   requested_identity: z.record(z.unknown()).optional(),
   artifact_identity: z.record(z.unknown()).optional(),

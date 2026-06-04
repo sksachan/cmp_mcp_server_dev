@@ -44,6 +44,7 @@ export type ExecutorResult = {
   cost_estimate?: Record<string, unknown>;
   validation_checks?: Array<Record<string, unknown>>;
   resource_inventory?: Record<string, unknown>;
+  load_balancer_diagnostics?: Record<string, unknown>;
   report_warnings?: string[];
   message?: string;
 } & Partial<FailureDiagnostic>;
@@ -408,6 +409,7 @@ export class DeploymentExecutor {
         cost_estimate: projection.cost_estimate,
         validation_checks: projection.validation_checks,
         resource_inventory: projection.resource_inventory,
+        load_balancer_diagnostics: projection.load_balancer_diagnostics,
         report_warnings: infraReport.report_warnings,
         infra_report: infraReport,
         application_url: base.application_url ?? (typeof endpoint.url === "string" ? endpoint.url : undefined),
