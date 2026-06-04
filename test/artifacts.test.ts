@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseArtifactBundle, validateArtifactBundle } from "../src/artifacts.js";
+import { normalizeNotes, parseArtifactBundle, validateArtifactBundle } from "../src/artifacts.js";
 
 const validBundle = {
   status: "artifacts_ready",
@@ -95,5 +95,57 @@ describe("artifact validation", () => {
       ]
     });
     expect(() => validateArtifactBundle(bundle!)).toThrow(/cloudformation_template/);
+  });
+
+  it("parses security notes as a string", () => {
+    const bundle = parseArtifactBundle({
+      ...validBundle,
+      security_notes: "No secrets in artifacts"
+    });
+
+    expect(bundle?.security_notes).toBe("No secrets in artifacts");
+    expect(normalizeNotes(bundle?.security_notes)).toBe("No secrets in artifacts");
+  });
+
+  it("parses and normalizes security notes as an object", () => {
+    const bundle = parseArtifactBundle({
+      ...validBundle,
+      security_notes: {
+        iam: "least privilege recommended",
+        network: ["public load balancer", "private worker nodes"]
+      }
+    });
+
+    expect(bundle?.security_notes).toEqual({
+      iam: "least privilege recommended",
+      network: ["public load balancer", "private worker nodes"]
+    });
+    expect(normalizeNotes(bundle?.security_notes)).toContain("\"iam\": \"least privilege recommended\"");
+  });
+
+  it("parses and normalizes security notes as an array", () => {
+    const bundle = parseArtifactBundle({
+      ...validBundle,
+      security_notes: ["Use IRSA", { rbac: "namespace scoped" }]
+    });
+
+    expect(bundle?.security_notes).toEqual(["Use IRSA", { rbac: "namespace scoped" }]);
+    expect(normalizeNotes(bundle?.security_notes)).toContain("\"Use IRSA\"");
+  });
+
+  it("parses and normalizes cost notes as an object", () => {
+    const bundle = parseArtifactBundle({
+      ...validBundle,
+      cost_notes: {
+        estimate: "EKS and NAT Gateway dominate POC cost",
+        monthly_total_estimate: 138
+      }
+    });
+
+    expect(bundle?.cost_notes).toEqual({
+      estimate: "EKS and NAT Gateway dominate POC cost",
+      monthly_total_estimate: 138
+    });
+    expect(normalizeNotes(bundle?.cost_notes)).toContain("\"monthly_total_estimate\": 138");
   });
 });

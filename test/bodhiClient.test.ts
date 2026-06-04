@@ -315,6 +315,73 @@ describe("BodhiClient", () => {
     expect(JSON.stringify(result)).not.toContain("exec_metadata");
   });
 
+  it("normalizes flexible artifact notes for status and execution responses", async () => {
+    const fetchImpl = async (url: string | URL | Request): Promise<Response> => {
+      if (String(url).endsWith("/tasks/task-id/runs/run-flex-notes")) {
+        return json({
+          id: "run-flex-notes",
+          status: "completed",
+          result: {
+            status: "artifacts_ready",
+            deployment_plan: ["Validate", "Deploy"],
+            deployment_artifacts: [
+              {
+                type: "cloudformation_template",
+                filename: "template.yaml",
+                content: "Resources: {}\n"
+              },
+              {
+                type: "metadata",
+                filename: "params.json",
+                content: JSON.stringify({
+                  app_name: "hello-world",
+                  stack_name: "hello-world-dev-eks",
+                  cluster_name: "hello-world-demo",
+                  namespace: "hello-world",
+                  aws_region: "us-east-1"
+                })
+              }
+            ],
+            cost_notes: {
+              estimate: "EKS, NAT Gateway, and Load Balancer are the main cost drivers.",
+              monthly_total_estimate: 138
+            },
+            security_notes: [
+              "No credentials in generated artifacts.",
+              { iam: "Use least privilege permissions for Railway AWS credentials." }
+            ]
+          }
+        });
+      }
+      return json({ hitltasks: [] });
+    };
+    const executor = {
+      execute: async () => ({
+        status: "deployed" as const,
+        executor_status: "deployed" as const,
+        workspace: "/tmp/workspace",
+        stack_name: "hello-world-dev-eks",
+        cluster_name: "hello-world-demo",
+        namespace: "hello-world",
+        app_name: "hello-world",
+        aws_region: "us-east-1",
+        commands: [],
+        logs_summary: "ok"
+      })
+    };
+
+    const client = new BodhiClient(config, fetchImpl as typeof fetch, executor);
+    const status = await client.getArtifactStatus({ run_id: "run-flex-notes" });
+    expect(status.status).toBe("artifacts_ready");
+    expect(status.cost_notes).toContain("\"monthly_total_estimate\": 138");
+    expect(status.security_notes).toContain("No credentials in generated artifacts.");
+
+    const result = await client.executeHelloWorldDeployment({ run_id: "run-flex-notes", confirm_execute: true, force_retry: false });
+    expect(result.status).toBe("deployed");
+    expect(result.cost_notes).toContain("\"estimate\":");
+    expect(result.security_notes).toContain("\"iam\":");
+  });
+
   it("caches terminal execution result by run id", async () => {
     let executorCalls = 0;
     const fetchImpl = async (url: string | URL | Request): Promise<Response> => {

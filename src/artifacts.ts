@@ -5,6 +5,19 @@ const SAFE_FILENAME = /^[A-Za-z0-9._-]+$/;
 const ALLOWED_TYPES = new Set(["cloudformation_template", "kubernetes_manifest", "metadata", "documentation"]);
 const ALLOWED_FILENAMES = new Set(["template.yaml", "template.yml", "k8s.yaml", "k8s.yml", "params.json", "README.md"]);
 
+const JsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(JsonValueSchema),
+    z.record(JsonValueSchema)
+  ])
+);
+
+const FlexibleNotesSchema = JsonValueSchema.optional();
+
 export const DeploymentArtifactSchema = z.object({
   type: z.enum(["cloudformation_template", "kubernetes_manifest", "metadata", "documentation"]),
   filename: z.string().min(1),
@@ -17,8 +30,8 @@ export const ArtifactBundleSchema = z.object({
   deployment_artifacts: z.array(DeploymentArtifactSchema).optional(),
   infra_details: z.record(z.unknown()).optional(),
   estimated_monthly_cost_usd: z.union([z.number(), z.string()]).optional(),
-  cost_notes: z.string().optional(),
-  security_notes: z.string().optional(),
+  cost_notes: FlexibleNotesSchema,
+  security_notes: FlexibleNotesSchema,
   next_steps: z.array(z.string()).optional()
 });
 
@@ -69,6 +82,12 @@ export function validateArtifactBundle(bundle: ArtifactBundle): ValidatedArtifac
     kubernetesManifest,
     metadata
   };
+}
+
+export function normalizeNotes(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2);
 }
 
 export type ValidatedArtifactBundle = ArtifactBundle & {

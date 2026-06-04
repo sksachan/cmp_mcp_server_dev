@@ -1,6 +1,6 @@
 import type { Config } from "./config.js";
 import type { ArtifactStatusRequest, DeploymentResult, DeploymentStatusRequest, DeployRequest, ExecuteDeploymentRequest, InfraReportRequest } from "./schemas.js";
-import { parseArtifactBundle, validateArtifactBundle, type ArtifactBundle, type ValidatedArtifactBundle } from "./artifacts.js";
+import { normalizeNotes, parseArtifactBundle, validateArtifactBundle, type ArtifactBundle, type ValidatedArtifactBundle } from "./artifacts.js";
 import { DeploymentExecutor, runCommand, type ExecutorResult } from "./deploymentExecutor.js";
 import { deriveStackName } from "./naming.js";
 import { sanitizeBodhiRun } from "./sanitize.js";
@@ -328,8 +328,8 @@ export class BodhiClient {
       aws_region: request.aws_region,
       artifact_filenames: validated.deployment_artifacts.map((artifact) => artifact.filename),
       deployment_plan: artifactBundle.deployment_plan,
-      cost_notes: artifactBundle.cost_notes,
-      security_notes: artifactBundle.security_notes,
+      cost_notes: normalizeNotes(artifactBundle.cost_notes),
+      security_notes: normalizeNotes(artifactBundle.security_notes),
       estimated_monthly_cost_usd: numberValue({ estimated_monthly_cost_usd: artifactBundle.estimated_monthly_cost_usd }, "estimated_monthly_cost_usd"),
       next_steps: ["Call execute_hello_world_eks_deployment with confirm_execute=true to create or update AWS infrastructure."],
       infra_details: {
@@ -365,8 +365,8 @@ export class BodhiClient {
       failed_command: executorResult.failed_command,
       logs_summary: executorResult.logs_summary,
       deployment_plan: artifactBundle.deployment_plan,
-      cost_notes: artifactBundle.cost_notes,
-      security_notes: artifactBundle.security_notes,
+      cost_notes: normalizeNotes(artifactBundle.cost_notes),
+      security_notes: normalizeNotes(artifactBundle.security_notes),
       infra_details: executorResult.infra_details,
       infra_report: executorResult.infra_report as unknown as Record<string, unknown> | undefined,
       infra_summary: executorResult.infra_summary,
