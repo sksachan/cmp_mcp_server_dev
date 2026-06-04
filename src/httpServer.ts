@@ -18,7 +18,11 @@ export function createHttpServer(config: Config): http.Server {
       if (req.method === "GET" && url.pathname === "/health") {
         return json(res, 200, {
           status: "ok",
-          service: "cmp-bodhi-eks-deployer"
+          service: "cmp-bodhi-eks-deployer",
+          tool_contract: "eks-deployer-v2-split-tools",
+          version: process.env.npm_package_version ?? "0.1.0",
+          git_sha: process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_SHA ?? "unknown",
+          build_time: process.env.BUILD_TIME ?? "unknown"
         });
       }
 

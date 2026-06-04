@@ -1,10 +1,10 @@
 import type { Config } from "./config.js";
 import type { ArtifactStatusRequest, DeploymentResult, DeploymentStatusRequest, DeployRequest, ExecuteDeploymentRequest, InfraReportRequest } from "./schemas.js";
-import { normalizeNotes, parseArtifactBundle, validateArtifactBundle, type ArtifactBundle, type ValidatedArtifactBundle } from "./artifacts.js";
+import { normalizeNotes, normalizeStringList, parseArtifactBundle, validateArtifactBundle, type ArtifactBundle, type ValidatedArtifactBundle } from "./artifacts.js";
 import { DeploymentExecutor, runCommand, type ExecutorResult } from "./deploymentExecutor.js";
-import { deriveStackName } from "./naming.js";
 import { sanitizeBodhiRun } from "./sanitize.js";
 import { InfraReporter } from "./infraReporter.js";
+import { completeIdentity, identityFromRequest, validateDeploymentIdentity, type DeploymentIdentity, type IdentityValidationResult } from "./deploymentIdentity.js";
 
 type Fetch = typeof fetch;
 
@@ -28,6 +28,7 @@ type BodhiRun = {
 type StoredDeployment = {
   runId: string;
   request: DeployRequest;
+  identity: DeploymentIdentity;
   requestKey: string;
   createdAt: number;
   submittedHitlIds: Set<string>;
@@ -59,7 +60,7 @@ export class BodhiClient {
 
   async startHelloWorldDeployment(request: DeployRequest): Promise<DeploymentResult> {
     this.cleanupJobs();
-    const stackName = deriveStackName(request.app_name, request.environment);
+    const stackName = request.stack_name;
 
     if (!request.confirm_deploy) {
       return {
@@ -86,6 +87,7 @@ export class BodhiClient {
     const job: StoredDeployment = {
       runId,
       request,
+      identity: identityFromRequest(request),
       requestKey,
       createdAt: Date.now(),
       submittedHitlIds: new Set()
@@ -109,18 +111,19 @@ export class BodhiClient {
     const job = this.deploymentsByRunId.get(runId);
     const run = await this.getRun(runId);
     const status = String(run.status ?? "unknown").toLowerCase();
-    const request = job?.request ?? defaultDeployRequest();
-    const stackName = deriveStackName(request.app_name, request.environment);
+    const request = job?.request;
+    const requestIdentity = job?.identity;
 
     if (!FINAL_STATUSES.has(status)) {
       return {
         status,
         run_id: runId,
-        app_name: request.app_name,
-        stack_name: stackName,
-        cluster_name: request.cluster_name,
-        namespace: request.namespace,
-        aws_region: request.aws_region,
+        app_name: request?.app_name,
+        stack_name: request?.stack_name,
+        cluster_name: request?.cluster_name,
+        namespace: request?.namespace,
+        aws_region: request?.aws_region,
+        request_identity_available: Boolean(requestIdentity),
         logs_summary: `Bodhi run ${runId} is ${status}.`,
         next_steps: ["Call get_hello_world_eks_artifact_status again after the workflow finishes."],
         bodhi_run: sanitizeBodhiRun(run)
@@ -132,11 +135,12 @@ export class BodhiClient {
       return {
         status: "artifacts_missing",
         run_id: runId,
-        app_name: request.app_name,
-        stack_name: stackName,
-        cluster_name: request.cluster_name,
-        namespace: request.namespace,
-        aws_region: request.aws_region,
+        app_name: request?.app_name,
+        stack_name: request?.stack_name,
+        cluster_name: request?.cluster_name,
+        namespace: request?.namespace,
+        aws_region: request?.aws_region,
+        request_identity_available: Boolean(requestIdentity),
         logs_summary: "Bodhi completed but did not return a valid deployment_artifacts JSON bundle.",
         next_steps: ["Upload the latest workflow JSON to Bodhi Studio and rerun the artifact generation."],
         bodhi_run: sanitizeBodhiRun(run)
@@ -144,7 +148,11 @@ export class BodhiClient {
     }
 
     const validated = validateArtifactBundle(artifactBundle);
-    return this.artifactReadyResult(runId, run, request, artifactBundle, validated);
+    const identityValidation = validateDeploymentIdentity({ artifactBundle, validatedBundle: validated, requestIdentity });
+    if (identityValidation.mismatches.length > 0) {
+      return this.identityMismatchResult(runId, requestIdentity, identityValidation, artifactBundle, validated, run);
+    }
+    return this.artifactReadyResult(runId, run, request, artifactBundle, validated, identityValidation);
   }
 
   async getDeploymentStatus(input: DeploymentStatusRequest): Promise<DeploymentResult> {
@@ -161,7 +169,7 @@ export class BodhiClient {
       return {
         status: "execution_refused",
         run_id: input.run_id,
-        stack_name: job ? deriveStackName(job.request.app_name, job.request.environment) : undefined,
+        stack_name: job?.identity.stack_name,
         logs_summary: "Execution was refused because confirm_execute was not true.",
         next_steps: ["Call execute_hello_world_eks_deployment with confirm_execute=true only when you intend to create or update AWS infrastructure."]
       };
@@ -178,40 +186,41 @@ export class BodhiClient {
       };
     }
 
-    const request = job?.request ?? defaultDeployRequest();
+    const request = job?.request ?? requestFromIdentityConfirmation(input.identity_confirmation);
+    const requestIdentity = job?.identity ?? completeIdentity(input.identity_confirmation);
+    if (!request || !requestIdentity) {
+      return {
+        status: "identity_confirmation_required",
+        executor_status: "failed",
+        run_id: input.run_id,
+        failure_stage: "artifact_identity_mismatch",
+        root_cause: "Stored MCP request identity is unavailable for this run. Execution requires explicit identity_confirmation.",
+        request_identity_available: false,
+        executor_logs: [],
+        next_steps: ["Call execute_hello_world_eks_deployment again with identity_confirmation matching the completed artifact bundle."]
+      };
+    }
     const artifactBundle = parseArtifactBundle(run);
     if (!artifactBundle) {
       return {
         status: "artifacts_missing",
         run_id: input.run_id,
-        stack_name: deriveStackName(request.app_name, request.environment),
+        stack_name: request.stack_name,
         logs_summary: "Bodhi completed but did not return deployment_artifacts, so execution cannot proceed.",
         bodhi_run: sanitizeBodhiRun(run)
       };
     }
 
     const validated = validateArtifactBundle(artifactBundle);
-    const mismatch = metadataMismatch(validated, request);
-    if (mismatch) {
-      const failure: DeploymentResult = {
-        status: "failed",
-        executor_status: "failed",
-        run_id: input.run_id,
-        app_name: request.app_name,
-        stack_name: deriveStackName(request.app_name, request.environment),
-        cluster_name: request.cluster_name,
-        namespace: request.namespace,
-        aws_region: request.aws_region,
-        failure_stage: "artifact_validation",
-        root_cause: mismatch,
-        remediation: ["Regenerate artifacts with the requested app_name/environment, or start a new deployment request matching the artifact metadata."]
-      };
+    const identityValidation = validateDeploymentIdentity({ artifactBundle, validatedBundle: validated, requestIdentity, identityConfirmation: input.identity_confirmation });
+    if (!identityValidation.ok) {
+      const failure = this.identityMismatchResult(input.run_id, requestIdentity, identityValidation, artifactBundle, validated, run);
       if (job) job.executionResult = failure;
       return failure;
     }
 
     if (job) job.executionState = "sam_deploy_started";
-    const executorResult = await this.executor.execute(validated, request);
+    const executorResult = await this.executor.execute(validated, request, { updateExisting: input.update_existing });
     const result = this.executionResult(input.run_id, artifactBundle, executorResult);
     if (job) {
       job.executionState = result.status === "deployed" ? "rollout_complete" : "failed";
@@ -304,7 +313,7 @@ export class BodhiClient {
       status: "started",
       run_id: runId,
       app_name: request.app_name,
-      stack_name: deriveStackName(request.app_name, request.environment),
+      stack_name: request.stack_name,
       cluster_name: request.cluster_name,
       namespace: request.namespace,
       aws_region: request.aws_region,
@@ -316,28 +325,35 @@ export class BodhiClient {
     };
   }
 
-  private artifactReadyResult(runId: string, run: BodhiRun, request: DeployRequest, artifactBundle: ArtifactBundle, validated: ValidatedArtifactBundle): DeploymentResult {
-    const stackName = deriveStackName(request.app_name, request.environment);
+  private artifactReadyResult(runId: string, run: BodhiRun, request: DeployRequest | undefined, artifactBundle: ArtifactBundle, validated: ValidatedArtifactBundle, identityValidation: IdentityValidationResult): DeploymentResult {
+    const identity = identityValidation.canonical_identity;
     return {
       status: "artifacts_ready",
       run_id: runId,
-      app_name: request.app_name,
-      stack_name: stackName,
-      cluster_name: request.cluster_name,
-      namespace: request.namespace,
-      aws_region: request.aws_region,
+      app_name: identity?.app_name ?? request?.app_name,
+      stack_name: identity?.stack_name ?? request?.stack_name,
+      cluster_name: identity?.cluster_name ?? request?.cluster_name,
+      namespace: identity?.namespace ?? request?.namespace,
+      aws_region: identity?.aws_region ?? request?.aws_region,
+      canonical_identity: identity,
+      request_identity_available: Boolean(request),
+      identity_findings: identityValidation.findings as unknown as Record<string, unknown>[],
+      identity_mismatches: identityValidation.mismatches as unknown as Record<string, unknown>[],
+      identity_warnings: identityValidation.warnings,
       artifact_filenames: validated.deployment_artifacts.map((artifact) => artifact.filename),
-      deployment_plan: artifactBundle.deployment_plan,
+      deployment_plan: normalizeStringList(artifactBundle.deployment_plan),
       cost_notes: normalizeNotes(artifactBundle.cost_notes),
       security_notes: normalizeNotes(artifactBundle.security_notes),
       estimated_monthly_cost_usd: numberValue({ estimated_monthly_cost_usd: artifactBundle.estimated_monthly_cost_usd }, "estimated_monthly_cost_usd"),
-      next_steps: ["Call execute_hello_world_eks_deployment with confirm_execute=true to create or update AWS infrastructure."],
+      next_steps: request
+        ? ["Call execute_hello_world_eks_deployment with confirm_execute=true to create or update AWS infrastructure."]
+        : ["Stored request identity is unavailable; execution requires identity_confirmation."],
       infra_details: {
-        expected_stack_name: stackName,
+        expected_stack_name: request?.stack_name,
         artifact_stack_name: stringValue(validated.metadata, "stack_name"),
-        cluster_name: request.cluster_name,
-        namespace: request.namespace,
-        aws_region: request.aws_region
+        cluster_name: identity?.cluster_name,
+        namespace: identity?.namespace,
+        aws_region: identity?.aws_region
       },
       bodhi_run: sanitizeBodhiRun(run)
     };
@@ -364,7 +380,7 @@ export class BodhiClient {
       remediation: executorResult.remediation,
       failed_command: executorResult.failed_command,
       logs_summary: executorResult.logs_summary,
-      deployment_plan: artifactBundle.deployment_plan,
+      deployment_plan: normalizeStringList(artifactBundle.deployment_plan),
       cost_notes: normalizeNotes(artifactBundle.cost_notes),
       security_notes: normalizeNotes(artifactBundle.security_notes),
       infra_details: executorResult.infra_details,
@@ -405,8 +421,46 @@ export class BodhiClient {
       environment: request.environment,
       budget_limit_usd: request.budget_limit_usd,
       confirm_deploy: request.confirm_deploy,
-      stack_name: deriveStackName(request.app_name, request.environment),
-      user_query: `Generate deployment artifacts for ${request.app_name} on EKS cluster ${request.cluster_name} in ${request.aws_region}. Expected stack name: ${deriveStackName(request.app_name, request.environment)}.\n\nDeployment context:\n${request.deployment_context}`
+      stack_name: request.stack_name,
+      user_query: `Generate deployment artifacts for ${request.app_name} on EKS cluster ${request.cluster_name} in ${request.aws_region}. Expected stack name: ${request.stack_name}.\n\nDeployment context:\n${request.deployment_context}`
+    };
+  }
+
+  private identityMismatchResult(runId: string, requestIdentity: DeploymentIdentity | undefined, identityValidation: IdentityValidationResult, artifactBundle: ArtifactBundle, validated: ValidatedArtifactBundle, run: BodhiRun): DeploymentResult {
+    const artifactIdentity = completeIdentity(identityValidation.findings.find((finding) => finding.source === "params_json")?.identity)
+      ?? completeIdentity(identityValidation.findings.find((finding) => finding.source === "infra_details")?.identity)
+      ?? completeIdentity(identityValidation.findings.find((finding) => finding.source === "artifact_root")?.identity)
+      ?? identityValidation.canonical_identity;
+    return {
+      status: "artifact_identity_mismatch",
+      executor_status: "failed",
+      run_id: runId,
+      app_name: requestIdentity?.app_name ?? artifactIdentity?.app_name,
+      stack_name: requestIdentity?.stack_name ?? artifactIdentity?.stack_name,
+      cluster_name: requestIdentity?.cluster_name ?? artifactIdentity?.cluster_name,
+      namespace: requestIdentity?.namespace ?? artifactIdentity?.namespace,
+      aws_region: requestIdentity?.aws_region ?? artifactIdentity?.aws_region,
+      failure_stage: "artifact_identity_mismatch",
+      root_cause: requestIdentity
+        ? "Bodhi artifact deployment identity does not match the requested MCP run identity."
+        : "Stored MCP request identity is unavailable or artifact identity is inconsistent.",
+      requested_identity: requestIdentity,
+      artifact_identity: artifactIdentity,
+      canonical_identity: identityValidation.canonical_identity,
+      request_identity_available: Boolean(requestIdentity),
+      identity_findings: identityValidation.findings as unknown as Record<string, unknown>[],
+      identity_mismatches: identityValidation.mismatches as unknown as Record<string, unknown>[],
+      identity_warnings: identityValidation.warnings,
+      artifact_filenames: validated.deployment_artifacts.map((artifact) => artifact.filename),
+      deployment_plan: normalizeStringList(artifactBundle.deployment_plan),
+      cost_notes: normalizeNotes(artifactBundle.cost_notes),
+      security_notes: normalizeNotes(artifactBundle.security_notes),
+      executor_logs: [],
+      next_steps: [
+        "Regenerate artifacts with aligned app_name, stack_name, cluster_name, namespace and region.",
+        "Do not execute deployment until identity mismatch is resolved."
+      ],
+      bodhi_run: sanitizeBodhiRun(run)
     };
   }
 
@@ -451,21 +505,11 @@ export class BodhiClient {
   }
 }
 
-function metadataMismatch(bundle: ValidatedArtifactBundle, request: DeployRequest): string | undefined {
-  const expectedStackName = deriveStackName(request.app_name, request.environment);
-  const artifactStackName = stringValue(bundle.metadata, "stack_name");
-  if (artifactStackName && artifactStackName !== expectedStackName) {
-    return `Artifact stack_name ${artifactStackName} does not match expected stack_name ${expectedStackName}.`;
-  }
-  const artifactAppName = stringValue(bundle.metadata, "app_name");
-  if (artifactAppName && artifactAppName !== request.app_name) return `Artifact app_name ${artifactAppName} does not match requested app_name ${request.app_name}.`;
-  return undefined;
-}
-
 function deploymentRequestKey(request: DeployRequest): string {
   return JSON.stringify({
     deployment_context: request.deployment_context,
     app_name: request.app_name,
+    stack_name: request.stack_name,
     github_repo: request.github_repo,
     github_branch: request.github_branch,
     aws_account_id: request.aws_account_id,
@@ -479,18 +523,21 @@ function deploymentRequestKey(request: DeployRequest): string {
   });
 }
 
-function defaultDeployRequest(): DeployRequest {
+function requestFromIdentityConfirmation(identity: ExecuteDeploymentRequest["identity_confirmation"]): DeployRequest | undefined {
+  const complete = completeIdentity(identity);
+  if (!complete) return undefined;
   return {
-    deployment_context: "Status lookup for a previously-started Hello World EKS deployment. Original deployment context is not available in this server process.",
-    app_name: "hello-world",
+    deployment_context: "Execution request for a historical Bodhi run with explicit identity_confirmation.",
+    app_name: complete.app_name,
+    stack_name: complete.stack_name,
     github_repo: "sksachan/cmp_mcp_server_dev",
     github_branch: "main",
     aws_account_id: process.env.AWS_ACCOUNT_ID ?? "051370627449",
     aws_account_alias: process.env.AWS_ACCOUNT_ALIAS ?? "demo",
-    aws_region: process.env.DEFAULT_AWS_REGION ?? "us-east-1",
-    cluster_name: process.env.DEFAULT_CLUSTER_NAME ?? "hello-world-demo",
-    namespace: process.env.DEFAULT_NAMESPACE ?? "hello-world",
-    environment: "dev",
+    aws_region: complete.aws_region,
+    cluster_name: complete.cluster_name,
+    namespace: complete.namespace,
+    environment: complete.environment,
     budget_limit_usd: Number(process.env.DEFAULT_BUDGET_LIMIT_USD ?? 100),
     confirm_deploy: true
   };

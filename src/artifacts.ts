@@ -26,14 +26,15 @@ export const DeploymentArtifactSchema = z.object({
 
 export const ArtifactBundleSchema = z.object({
   status: z.string(),
-  deployment_plan: z.array(z.string()).optional(),
+  deployment_plan: JsonValueSchema.optional(),
   deployment_artifacts: z.array(DeploymentArtifactSchema).optional(),
   infra_details: z.record(z.unknown()).optional(),
   estimated_monthly_cost_usd: z.union([z.number(), z.string()]).optional(),
+  cost_estimate: JsonValueSchema.optional(),
   cost_notes: FlexibleNotesSchema,
   security_notes: FlexibleNotesSchema,
-  next_steps: z.array(z.string()).optional()
-});
+  next_steps: JsonValueSchema.optional()
+}).passthrough();
 
 export type DeploymentArtifact = z.infer<typeof DeploymentArtifactSchema>;
 export type ArtifactBundle = z.infer<typeof ArtifactBundleSchema>;
@@ -72,11 +73,16 @@ export function validateArtifactBundle(bundle: ArtifactBundle): ValidatedArtifac
   }
 
   const kubernetesManifest = validated.find((artifact) => artifact.type === "kubernetes_manifest");
+  if (!kubernetesManifest) {
+    throw new Error("Bodhi artifact bundle must include a kubernetes_manifest artifact");
+  }
   const metadataArtifact = validated.find((artifact) => artifact.type === "metadata");
   const metadata = parseMetadata(metadataArtifact?.content);
 
   return {
     ...bundle,
+    deployment_plan: normalizeStringList(bundle.deployment_plan),
+    next_steps: normalizeStringList(bundle.next_steps),
     deployment_artifacts: validated,
     cloudformationTemplate,
     kubernetesManifest,
@@ -88,6 +94,16 @@ export function normalizeNotes(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "string") return value;
   return JSON.stringify(value, null, 2);
+}
+
+export function normalizeStringList(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (Array.isArray(value)) {
+    const items = value.map((item) => typeof item === "string" ? item : JSON.stringify(item)).filter(Boolean);
+    return items.length > 0 ? items : undefined;
+  }
+  if (typeof value === "string") return value.trim() ? [value] : undefined;
+  return [JSON.stringify(value, null, 2)];
 }
 
 export type ValidatedArtifactBundle = ArtifactBundle & {

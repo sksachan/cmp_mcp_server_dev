@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BodhiClient } from "./bodhiClient.js";
-import { ArtifactStatusRequestSchema, DeploymentStatusRequestSchema, DeployRequestSchema, ExecuteDeploymentRequestSchema, InfraReportRequestSchema } from "./schemas.js";
+import { ArtifactStatusRequestSchema, DeploymentStatusRequestSchema, DeployRequestSchema, ExecuteDeploymentRequestSchema, InfraReportRequestSchema, normalizeDeployRequest } from "./schemas.js";
 
 export function createMcpServer(bodhiClient: BodhiClient): McpServer {
   const server = new McpServer({
@@ -20,7 +20,7 @@ export function createMcpServer(bodhiClient: BodhiClient): McpServer {
       securitySchemes,
       _meta: { securitySchemes }
     } as Parameters<McpServer["registerTool"]>[1],
-    async (input) => toolResponse(await bodhiClient.startHelloWorldDeployment(DeployRequestSchema.parse(input)))
+    async (input) => toolResponse(await bodhiClient.startHelloWorldDeployment(normalizeDeployRequest(DeployRequestSchema.parse(input))))
   );
 
   server.registerTool(

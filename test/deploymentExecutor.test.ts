@@ -29,6 +29,7 @@ const config: Config = {
 const request: DeployRequest = {
   deployment_context: "Purpose: POC validation. Environment: dev. Audience: personal demo. Maturity: MVP. Components: minimal EKS app with cost-conscious defaults.",
   app_name: "hello-world",
+  stack_name: "hello-world-dev-eks",
   github_repo: "sksachan/cmp_mcp_server_dev",
   github_branch: "main",
   aws_account_id: "051370627449",
@@ -114,6 +115,11 @@ describe("DeploymentExecutor", () => {
           ].join("\n")
         },
         {
+          type: "kubernetes_manifest",
+          filename: "k8s.yaml",
+          content: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello-world\n"
+        },
+        {
           type: "metadata",
           filename: "params.json",
           content: JSON.stringify({
@@ -142,9 +148,9 @@ describe("DeploymentExecutor", () => {
       if (command === "aws" && args[0] === "cloudformation" && args.includes("Stacks[0].StackStatus")) {
         return {
           command: [command, ...args].join(" "),
-          exitCode: 0,
-          stdout: "CREATE_COMPLETE",
-          stderr: ""
+          exitCode: 255,
+          stdout: "",
+          stderr: "ValidationError: Stack with id hello-world-dev-eks does not exist"
         };
       }
       if (command === "aws" && args[0] === "cloudformation" && args.includes("Stacks[0]")) {
@@ -189,6 +195,11 @@ describe("DeploymentExecutor", () => {
           content: "Resources: {}\n"
         },
         {
+          type: "kubernetes_manifest",
+          filename: "k8s.yaml",
+          content: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello-world\n"
+        },
+        {
           type: "metadata",
           filename: "params.json",
           content: JSON.stringify({
@@ -214,6 +225,49 @@ describe("DeploymentExecutor", () => {
     expect(result.status).toBe("failed");
     expect(result.failure_stage).toBe("cloudformation_preflight");
     expect(result.root_cause).toContain("ROLLBACK_COMPLETE");
+    expect(commands.some((command) => command.startsWith("sam deploy"))).toBe(false);
+  });
+
+  it("blocks existing completed stacks unless update_existing is true", async () => {
+    const bundle = validateArtifactBundle({
+      status: "artifacts_ready",
+      deployment_artifacts: [
+        {
+          type: "cloudformation_template",
+          filename: "template.yaml",
+          content: "Resources: {}\n"
+        },
+        {
+          type: "kubernetes_manifest",
+          filename: "k8s.yaml",
+          content: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello-world\n"
+        },
+        {
+          type: "metadata",
+          filename: "params.json",
+          content: JSON.stringify({
+            stack_name: "hello-world-dev-eks",
+            cluster_name: "hello-world-demo",
+            namespace: "hello-world",
+            aws_region: "us-east-1"
+          })
+        }
+      ]
+    });
+    const commands: string[] = [];
+    const runner = async (command: string, args: string[]) => {
+      commands.push([command, ...args].join(" "));
+      if (command === "aws" && args.includes("Stacks[0].StackStatus")) {
+        return { command: [command, ...args].join(" "), exitCode: 0, stdout: "CREATE_COMPLETE", stderr: "" };
+      }
+      return { command: [command, ...args].join(" "), exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const result = await new DeploymentExecutor(config, runner).execute(bundle, request);
+
+    expect(result.status).toBe("failed");
+    expect(result.failure_stage).toBe("cloudformation_preflight");
+    expect(result.root_cause).toContain("already exists");
     expect(commands.some((command) => command.startsWith("sam deploy"))).toBe(false);
   });
 
@@ -286,7 +340,7 @@ describe("DeploymentExecutor", () => {
     const commands: string[] = [];
     const runner = async (command: string, args: string[], options: { cwd: string }) => {
       commands.push([command, ...args].join(" "));
-      if (command === "aws" && args.includes("Stacks[0].StackStatus")) return { command: [command, ...args].join(" "), exitCode: 0, stdout: "CREATE_COMPLETE", stderr: "" };
+      if (command === "aws" && args.includes("Stacks[0].StackStatus")) return { command: [command, ...args].join(" "), exitCode: 255, stdout: "", stderr: "ValidationError: Stack with id hello-world-dev-eks does not exist" };
       if (command === "aws" && args.includes("Stacks[0]")) {
         return {
           command: [command, ...args].join(" "),

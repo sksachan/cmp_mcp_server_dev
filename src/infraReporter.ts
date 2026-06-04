@@ -197,9 +197,16 @@ export class InfraReporter {
   private async discoverKubernetes(input: InfraReportInput, env: NodeJS.ProcessEnv, warnings: string[]): Promise<Record<string, unknown>> {
     const deployment = await this.readKubectlJson("deployment", ["get", "deployment", input.appName, "-n", input.namespace, "-o", "json"], env, warnings)
       || await this.readKubectlJson("deployment fallback", ["get", "deployment", "hello-world", "-n", input.namespace, "-o", "json"], env, warnings)
+      || selectSingle(await this.readKubectlJson("deployment by app label", ["get", "deployment", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings))
+      || selectSingle(await this.readKubectlJson("deployment by hello-world label", ["get", "deployment", "-n", input.namespace, "-l", "app=hello-world", "-o", "json"], env, warnings))
+      || this.warnSingle("deployment", selectSingle(await this.readKubectlJson("single deployment", ["get", "deployment", "-n", input.namespace, "-o", "json"], env, warnings)), warnings)
       || {};
     const service = await this.readKubectlJson("service", ["get", "svc", input.appName, "-n", input.namespace, "-o", "json"], env, warnings)
+      || await this.readKubectlJson("service app-svc fallback", ["get", "svc", `${input.appName}-svc`, "-n", input.namespace, "-o", "json"], env, warnings)
       || await this.readKubectlJson("service fallback", ["get", "svc", "hello-world-svc", "-n", input.namespace, "-o", "json"], env, warnings)
+      || selectSingle(await this.readKubectlJson("service by app label", ["get", "svc", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings))
+      || selectSingle(await this.readKubectlJson("service by hello-world label", ["get", "svc", "-n", input.namespace, "-l", "app=hello-world", "-o", "json"], env, warnings))
+      || this.warnSingle("service", selectSingle(await this.readKubectlJson("single service", ["get", "svc", "-n", input.namespace, "-o", "json"], env, warnings)), warnings)
       || {};
     const podsData = await this.readKubectlJson("pods", ["get", "pods", "-n", input.namespace, "-o", "json"], env, warnings) || {};
     const pods = Array.isArray(podsData.items) ? podsData.items.map(summarizePod) : [];
@@ -241,6 +248,11 @@ export class InfraReporter {
 
   private async run(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<CommandResult> {
     return this.commandRunner(command, args, { cwd: tmpdir(), timeoutMs: this.timeoutMs, env });
+  }
+
+  private warnSingle(kind: string, value: Record<string, any> | null, warnings: string[]): Record<string, any> | null {
+    if (value) warnings.push(`Used only ${kind} in namespace as Kubernetes discovery fallback.`);
+    return value;
   }
 }
 
@@ -322,6 +334,11 @@ function parseJsonObject(value: string, label: string, warnings: string[]): Reco
     warnings.push(`Could not parse ${label} JSON response.`);
     return {};
   }
+}
+
+function selectSingle(value: Record<string, any> | null): Record<string, any> | null {
+  const items = value?.items;
+  return Array.isArray(items) && items.length === 1 ? items[0] : null;
 }
 
 function availableReplicas(kubernetes: Record<string, unknown>): number {

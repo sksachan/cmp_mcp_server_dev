@@ -28,6 +28,7 @@ const config: Config = {
 const request: DeployRequest = {
   deployment_context: "Purpose: POC validation. Environment: dev. Audience: personal demo. Maturity: MVP. Components: minimal EKS app with cost-conscious defaults.",
   app_name: "hello-world",
+  stack_name: "hello-world-dev-eks",
   github_repo: "sksachan/cmp_mcp_server_dev",
   github_branch: "main",
   aws_account_id: "051370627449",
@@ -132,6 +133,7 @@ describe("BodhiClient", () => {
       if (String(url).endsWith("/tasks/runs/run-started/hitltasks") && init?.method === "POST") {
         const body = JSON.parse(String(init.body));
         expect(body.hitltasks[0].response.deployment_context).toContain("POC validation");
+        expect(body.hitltasks[0].response.stack_name).toBe("hello-world-dev-eks");
         return json({ ok: true });
       }
 
@@ -210,10 +212,15 @@ describe("BodhiClient", () => {
                 content: "Resources: {}\n"
               },
               {
+                type: "kubernetes_manifest",
+                filename: "k8s.yaml",
+                content: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello-world\n"
+              },
+              {
                 type: "metadata",
                 filename: "params.json",
                 content: JSON.stringify({
-                  stack_name: "hello-world-dev",
+                  stack_name: "hello-world-dev-eks",
                   app_name: "hello-world",
                   cluster_name: "hello-world-demo",
                   namespace: "hello-world",
@@ -261,8 +268,7 @@ describe("BodhiClient", () => {
     expect(refused.status).toBe("execution_refused");
 
     const result = await client.executeHelloWorldDeployment({ run_id: started.run_id, confirm_execute: true, force_retry: false });
-    expect(result.status).toBe("failed");
-    expect(result.failure_stage).toBe("artifact_validation");
+    expect(result.status).toBe("deployed");
   });
 
   it("sanitizes read-only artifact status and does not call executor", async () => {
@@ -281,6 +287,11 @@ describe("BodhiClient", () => {
                 type: "cloudformation_template",
                 filename: "template.yaml",
                 content: "Resources: {}\n"
+              },
+              {
+                type: "kubernetes_manifest",
+                filename: "k8s.yaml",
+                content: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello-world\n"
               },
               {
                 type: "metadata",
@@ -310,9 +321,88 @@ describe("BodhiClient", () => {
     const result = await client.getArtifactStatus({ run_id: "run-ready" });
 
     expect(result.status).toBe("artifacts_ready");
+    expect(result.request_identity_available).toBe(false);
     expect(executorCalls).toBe(0);
     expect(JSON.stringify(result)).not.toContain("secret-token");
     expect(JSON.stringify(result)).not.toContain("exec_metadata");
+
+    const execute = await client.executeHelloWorldDeployment({ run_id: "run-ready", confirm_execute: true, force_retry: false });
+    expect(execute.status).toBe("identity_confirmation_required");
+    expect(executorCalls).toBe(0);
+  });
+
+  it("blocks v4-style artifact identity mismatches before execution", async () => {
+    let executorCalls = 0;
+    const fetchImpl = async (url: string | URL | Request): Promise<Response> => {
+      if (String(url).endsWith("/tasks/task-id/runs/run-v4-mismatch")) {
+        return json({
+          id: "run-v4-mismatch",
+          status: "completed",
+          result: {
+            status: "artifacts_ready",
+            app_name: "hello-world",
+            stack_name: "hello-world-dev-eks",
+            cluster_name: "hello-world-demo",
+            namespace: "hello-world",
+            aws_region: "us-east-1",
+            deployment_artifacts: [
+              {
+                type: "cloudformation_template",
+                filename: "template.yaml",
+                content: "Resources: {}\n"
+              },
+              {
+                type: "kubernetes_manifest",
+                filename: "k8s.yaml",
+                content: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello-world-v4\n  namespace: hello-world-v4\n"
+              },
+              {
+                type: "metadata",
+                filename: "params.json",
+                content: JSON.stringify({
+                  app_name: "hello-world-v4",
+                  stack_name: "hello-world-v4-dev-eks",
+                  cluster_name: "hello-world-demo-v4",
+                  namespace: "hello-world-v4",
+                  aws_region: "us-east-1",
+                  environment: "dev"
+                })
+              }
+            ]
+          }
+        });
+      }
+      return json({ hitltasks: [] });
+    };
+    const executor = {
+      execute: async () => {
+        executorCalls += 1;
+        throw new Error("should not execute");
+      }
+    };
+
+    const client = new BodhiClient(config, fetchImpl as typeof fetch, executor);
+    const status = await client.getArtifactStatus({ run_id: "run-v4-mismatch" });
+    expect(status.status).toBe("artifact_identity_mismatch");
+    expect(status.identity_mismatches?.some((mismatch) => mismatch.field === "app_name")).toBe(true);
+    expect(status.next_steps?.join(" ")).not.toContain("Call execute_hello_world_eks_deployment");
+
+    const result = await client.executeHelloWorldDeployment({
+      run_id: "run-v4-mismatch",
+      confirm_execute: true,
+      force_retry: false,
+      identity_confirmation: {
+        app_name: "hello-world-v4",
+        stack_name: "hello-world-v4-dev-eks",
+        cluster_name: "hello-world-demo-v4",
+        namespace: "hello-world-v4",
+        aws_region: "us-east-1",
+        environment: "dev"
+      }
+    });
+    expect(result.status).toBe("artifact_identity_mismatch");
+    expect(result.executor_logs).toEqual([]);
+    expect(executorCalls).toBe(0);
   });
 
   it("normalizes flexible artifact notes for status and execution responses", async () => {
@@ -329,6 +419,11 @@ describe("BodhiClient", () => {
                 type: "cloudformation_template",
                 filename: "template.yaml",
                 content: "Resources: {}\n"
+              },
+              {
+                type: "kubernetes_manifest",
+                filename: "k8s.yaml",
+                content: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello-world\n"
               },
               {
                 type: "metadata",
@@ -376,7 +471,19 @@ describe("BodhiClient", () => {
     expect(status.cost_notes).toContain("\"monthly_total_estimate\": 138");
     expect(status.security_notes).toContain("No credentials in generated artifacts.");
 
-    const result = await client.executeHelloWorldDeployment({ run_id: "run-flex-notes", confirm_execute: true, force_retry: false });
+    const result = await client.executeHelloWorldDeployment({
+      run_id: "run-flex-notes",
+      confirm_execute: true,
+      force_retry: false,
+      identity_confirmation: {
+        app_name: "hello-world",
+        stack_name: "hello-world-dev-eks",
+        cluster_name: "hello-world-demo",
+        namespace: "hello-world",
+        aws_region: "us-east-1",
+        environment: "dev"
+      }
+    });
     expect(result.status).toBe("deployed");
     expect(result.cost_notes).toContain("\"estimate\":");
     expect(result.security_notes).toContain("\"iam\":");
@@ -396,6 +503,11 @@ describe("BodhiClient", () => {
                 type: "cloudformation_template",
                 filename: "template.yaml",
                 content: "Resources: {}\n"
+              },
+              {
+                type: "kubernetes_manifest",
+                filename: "k8s.yaml",
+                content: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: hello-world\n"
               },
               {
                 type: "metadata",
@@ -433,8 +545,21 @@ describe("BodhiClient", () => {
     };
 
     const client = new BodhiClient(config, fetchImpl as typeof fetch, executor);
-    const first = await client.executeHelloWorldDeployment({ run_id: "run-execute", confirm_execute: true, force_retry: false });
-    const second = await client.executeHelloWorldDeployment({ run_id: "run-execute", confirm_execute: true, force_retry: false });
+    const executionRequest = {
+      run_id: "run-execute",
+      confirm_execute: true,
+      force_retry: false,
+      identity_confirmation: {
+        app_name: "hello-world",
+        stack_name: "hello-world-dev-eks",
+        cluster_name: "hello-world-demo",
+        namespace: "hello-world",
+        aws_region: "us-east-1",
+        environment: "dev"
+      }
+    };
+    const first = await client.executeHelloWorldDeployment(executionRequest);
+    const second = await client.executeHelloWorldDeployment(executionRequest);
 
     expect(first.status).toBe("deployed");
     expect(second.status).toBe("deployed");

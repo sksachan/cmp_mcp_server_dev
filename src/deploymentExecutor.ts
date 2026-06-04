@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import type { Config } from "./config.js";
 import type { DeployRequest } from "./schemas.js";
 import type { DeploymentArtifact, ValidatedArtifactBundle } from "./artifacts.js";
-import { deriveStackName, sanitizeName } from "./naming.js";
+import { sanitizeName } from "./naming.js";
 import { classifyCommandFailure, rollbackCompleteDiagnostic, type FailureDiagnostic } from "./failureClassifier.js";
 import { cleanupCommands, InfraReporter, type InfraReport } from "./infraReporter.js";
 
@@ -55,9 +55,9 @@ export class DeploymentExecutor {
     this.reporter = new InfraReporter(runner, config.executorCommandTimeoutMs);
   }
 
-  async execute(bundle: ValidatedArtifactBundle, request: DeployRequest): Promise<ExecutorResult> {
+  async execute(bundle: ValidatedArtifactBundle, request: DeployRequest, options: { updateExisting?: boolean } = {}): Promise<ExecutorResult> {
     const workspace = await this.writeArtifacts(bundle.deployment_artifacts);
-    const stackName = stringValue(bundle.metadata.stack_name) ?? deriveStackName(request.app_name, request.environment);
+    const stackName = stringValue(bundle.metadata.stack_name) ?? request.stack_name;
     const clusterName = stringValue(bundle.metadata.cluster_name) ?? request.cluster_name;
     const namespace = stringValue(bundle.metadata.namespace) ?? request.namespace;
     const region = stringValue(bundle.metadata.aws_region) ?? request.aws_region;
@@ -106,7 +106,7 @@ export class DeploymentExecutor {
     const validate = await this.run(commands, "sam", ["validate", "--template-file", bundle.cloudformationTemplate.filename, "--region", region], workspace, env);
     if (validate.exitCode !== 0) return failedResult(baseContext(workspace, commands, stackName, clusterName, namespace, appName, region), classifyCommandFailure(validate, { stackName, region, stage: "sam_validate" }));
 
-    const preflight = await this.cloudFormationPreflight(commands, workspace, env, stackName, region);
+    const preflight = await this.cloudFormationPreflight(commands, workspace, env, stackName, region, options.updateExisting === true);
     if (preflight.decision !== "proceed") {
       return failedResult(baseContext(workspace, commands, stackName, clusterName, namespace, appName, region, undefined, preflight.stackStatus), preflight.diagnostic, preflight.decision === "blocked" ? "blocked" : "failed");
     }
@@ -149,9 +149,11 @@ export class DeploymentExecutor {
         });
       }
       let manifest = await readFile(manifestPath, "utf8");
-      if (this.config.usePublicHelloWorldImage) {
+      let imageMode = determineImageMode(manifest);
+      if (this.config.usePublicHelloWorldImage && imageMode !== "public_nginx") {
         manifest = applyPublicHelloWorldImageOverride(manifest);
         await writeFile(manifestPath, manifest, "utf8");
+        imageMode = "public_nginx_unprivileged";
       }
 
       const updateKubeconfig = await this.run(commands, "aws", ["eks", "update-kubeconfig", "--name", clusterName, "--region", region], workspace, env);
@@ -177,7 +179,7 @@ export class DeploymentExecutor {
           ...context,
           status: "deployed_pending_endpoint",
           executor_status: "deployed",
-          image_mode: this.config.usePublicHelloWorldImage ? "public_nginx_unprivileged" : undefined,
+          image_mode: imageMode,
           rollout_status: "success",
           root_cause: "LoadBalancer hostname not yet assigned.",
           remediation: [
@@ -192,7 +194,7 @@ export class DeploymentExecutor {
         ...context,
         status: "deployed",
         executor_status: "deployed",
-        image_mode: this.config.usePublicHelloWorldImage ? "public_nginx_unprivileged" : undefined,
+        image_mode: imageMode,
         rollout_status: "success",
         service_hostname: serviceHostname,
         application_url: `http://${serviceHostname}`,
@@ -211,7 +213,7 @@ export class DeploymentExecutor {
   }
 
   buildCommandPlan(bundle: ValidatedArtifactBundle, request: DeployRequest): Array<{ command: string; args: string[] }> {
-    const stackName = stringValue(bundle.metadata.stack_name) ?? deriveStackName(request.app_name, request.environment);
+    const stackName = stringValue(bundle.metadata.stack_name) ?? request.stack_name;
     const clusterName = stringValue(bundle.metadata.cluster_name) ?? request.cluster_name;
     const namespace = stringValue(bundle.metadata.namespace) ?? request.namespace;
     const region = stringValue(bundle.metadata.aws_region) ?? request.aws_region;
@@ -261,7 +263,7 @@ export class DeploymentExecutor {
     return result;
   }
 
-  private async cloudFormationPreflight(commands: CommandResult[], workspace: string, env: NodeJS.ProcessEnv, stackName: string, region: string): Promise<{ decision: "proceed" | "failed" | "blocked"; stackStatus?: string; diagnostic?: FailureDiagnostic }> {
+  private async cloudFormationPreflight(commands: CommandResult[], workspace: string, env: NodeJS.ProcessEnv, stackName: string, region: string, updateExisting: boolean): Promise<{ decision: "proceed" | "failed" | "blocked"; stackStatus?: string; diagnostic?: FailureDiagnostic }> {
     const result = await this.run(commands, "aws", ["cloudformation", "describe-stacks", "--stack-name", stackName, "--region", region, "--query", "Stacks[0].StackStatus", "--output", "text"], workspace, env);
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.exitCode !== 0) {
@@ -293,6 +295,18 @@ export class DeploymentExecutor {
           failure_stage: "cloudformation_preflight",
           root_cause: `CloudFormation stack ${stackName} is in unsupported state ${stackStatus}.`,
           remediation: ["Delete or repair the stack, or use a new app_name/stack_name."],
+          failed_command: result.command
+        }
+      };
+    }
+    if (!updateExisting) {
+      return {
+        decision: "failed",
+        stackStatus,
+        diagnostic: {
+          failure_stage: "cloudformation_preflight",
+          root_cause: `CloudFormation stack ${stackName} already exists in ${stackStatus}.`,
+          remediation: ["Set update_existing=true only if this stack belongs to the same deployment identity, or use a new stack_name."],
           failed_command: result.command
         }
       };
@@ -575,6 +589,14 @@ function applyPublicHelloWorldImageOverride(manifest: string): string {
     updated = updated.replace(/image:\s*nginxinc\/nginx-unprivileged:alpine/g, "image: nginxinc/nginx-unprivileged:alpine\n          imagePullPolicy: IfNotPresent");
   }
   return updated;
+}
+
+function determineImageMode(manifest: string): string | undefined {
+  if (/image:\s*public\.ecr\.aws\/nginx\/nginx:1\.25-alpine/.test(manifest)) return "public_nginx";
+  if (/image:\s*nginxinc\/nginx-unprivileged:alpine/.test(manifest)) return "public_nginx_unprivileged";
+  if (/image:\s*(PATCH_ECR_IMAGE_URI|ECR_REPOSITORY_URI_PATCH_TARGET)(:latest)?/.test(manifest)) return "public_nginx_unprivileged";
+  if (/image:\s*\S+\.dkr\.ecr\.[^\s]+(:[A-Za-z0-9._-]+)?/.test(manifest)) return "public_nginx_unprivileged";
+  return undefined;
 }
 
 function extractKubernetesName(manifest: string, kind: string): string | undefined {

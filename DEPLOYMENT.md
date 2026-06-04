@@ -119,7 +119,7 @@ get_hello_world_eks_infra_report
 get_hello_world_eks_deployment_status
 ```
 
-`deploy_hello_world_to_eks` starts the Bodhi workflow and returns a `run_id` quickly to avoid ChatGPT request timeouts. `get_hello_world_eks_artifact_status` is read-only and never runs SAM/AWS/kubectl. `execute_hello_world_eks_deployment` performs the explicit infrastructure deployment and requires `confirm_execute=true`; after a healthy deployment it returns `application_url`, `infra_summary`, `infra_report`, realistic monthly cost estimates, and cleanup commands. `get_hello_world_eks_infra_report` is read-only and can rediscover CloudFormation, EKS, VPC, ECR, Kubernetes, endpoint, and cost details later without redeploying. `get_hello_world_eks_deployment_status` remains as a deprecated read-only alias. The deploy tool requires `deployment_context`; ask clarifying questions before calling it.
+`deploy_hello_world_to_eks` starts the Bodhi workflow and returns a `run_id` quickly to avoid ChatGPT request timeouts. It accepts `stack_name`; when omitted, the server derives `<app_name>-<environment>-eks` and submits that value to Bodhi. `get_hello_world_eks_artifact_status` is read-only, never runs SAM/AWS/kubectl, and validates canonical identity before telling the user artifacts are executable. `execute_hello_world_eks_deployment` performs the explicit infrastructure deployment and requires `confirm_execute=true`; it blocks before AWS if artifact identity mismatches the requested MCP run identity. Historical runs without stored request identity require `identity_confirmation`. Existing stacks require `update_existing=true`. After a healthy deployment, execution returns `application_url`, `infra_summary`, `infra_report`, realistic monthly cost estimates, and cleanup commands. `get_hello_world_eks_infra_report` is read-only and can rediscover CloudFormation, EKS, VPC, ECR, Kubernetes, endpoint, and cost details later without redeploying. `get_hello_world_eks_deployment_status` remains as a deprecated read-only alias. The deploy tool requires `deployment_context`; ask clarifying questions before calling it.
 
 Minimum test request:
 
@@ -127,6 +127,7 @@ Minimum test request:
 {
   "deployment_context": "Purpose: POC validation for ChatGPT-triggered EKS deployment. Environment: dev. Audience: personal/internal demo. Maturity: MVP. Required components: minimal Hello World frontend on EKS with cost-conscious defaults and no production HA requirements.",
   "app_name": "hello-world",
+  "stack_name": "hello-world-dev-eks",
   "github_repo": "sksachan/cmp_mcp_server_dev",
   "github_branch": "main",
   "aws_account_id": "051370627449",

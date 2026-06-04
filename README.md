@@ -115,4 +115,11 @@ Railway uses the checked-in `Dockerfile` so the runtime image contains Node 22, 
 
 Before `sam validate`, the executor normalizes generated EKS templates by removing inline `SecurityGroupIngress` sections that reference other security groups from `AWS::EC2::SecurityGroup` resources. Those rules should be standalone `AWS::EC2::SecurityGroupIngress` resources; this avoids CloudFormation circular dependencies during EKS security group creation.
 
-The main tool, `deploy_hello_world_to_eks`, starts the Bodhi workflow and returns a `run_id`. ChatGPT should then call read-only `get_hello_world_eks_artifact_status` with that `run_id`. Only `execute_hello_world_eks_deployment` creates or updates AWS infrastructure, and it requires `confirm_execute=true`. Successful execution includes `infra_summary`, `infra_report`, `application_url`, monthly cost estimate, and cleanup commands. `get_hello_world_eks_infra_report` can fetch the same style of report later without redeploying. The deploy tool requires `deployment_context`, so ChatGPT should ask clarifying questions about purpose, environment, audience, POC/MVP/production maturity, required components, and cost/security constraints before starting artifact generation.
+The main flow is:
+
+1. `deploy_hello_world_to_eks` starts Bodhi artifact generation and returns `run_id`.
+2. `get_hello_world_eks_artifact_status` is read-only and validates artifact identity.
+3. `execute_hello_world_eks_deployment` creates or updates AWS infrastructure only with `confirm_execute=true`.
+4. `get_hello_world_eks_infra_report` is read-only and can rediscover the deployed infrastructure later.
+
+The deploy tool accepts optional `stack_name`; if omitted, it derives `<app_name>-<environment>-eks`. The MCP server stores the requested app, stack, cluster, namespace, region, and environment by `run_id`, passes `stack_name` to Bodhi, and blocks execution if returned artifacts disagree with the requested identity. Historical runs without stored request identity require explicit `identity_confirmation` before execution. Existing CloudFormation stacks require `update_existing=true`; otherwise the executor blocks before `sam deploy`.
