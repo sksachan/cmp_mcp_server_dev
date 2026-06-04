@@ -3,7 +3,7 @@ import type { ArtifactStatusRequest, DeploymentResult, DeploymentStatusRequest, 
 import { normalizeNotes, normalizeStringList, parseArtifactBundle, validateArtifactBundle, type ArtifactBundle, type ValidatedArtifactBundle } from "./artifacts.js";
 import { DeploymentExecutor, runCommand, type ExecutorResult } from "./deploymentExecutor.js";
 import { sanitizeBodhiRun } from "./sanitize.js";
-import { InfraReporter } from "./infraReporter.js";
+import { buildDevopsReportProjection, InfraReporter } from "./infraReporter.js";
 import { completeIdentity, identityFromRequest, validateDeploymentIdentity, type DeploymentIdentity, type IdentityValidationResult } from "./deploymentIdentity.js";
 
 type Fetch = typeof fetch;
@@ -239,31 +239,36 @@ export class BodhiClient {
       clusterName: input.cluster_name ?? input.stack_name.replace(/-eks$/, ""),
       imageMode: this.config.usePublicHelloWorldImage ? "public_nginx_unprivileged" : undefined
     });
-    const service = report.kubernetes?.service as { hostname?: string } | undefined;
-    const cost = report.cost_estimate as { monthly_total_estimate?: number };
+    const projection = buildDevopsReportProjection(report, {
+      stackName: input.stack_name,
+      region: input.aws_region,
+      appName: input.app_name,
+      namespace: input.namespace,
+      clusterName: input.cluster_name,
+      awsAccountId: process.env.AWS_ACCOUNT_ID,
+      budgetTargetUsd: Number(process.env.DEFAULT_BUDGET_LIMIT_USD ?? 100)
+    });
+    const endpoint = projection.application_endpoint as { url?: string | null };
     return {
       status: report.report_warnings?.length ? "report_ready_with_warnings" : "report_ready",
       run_id: "not-applicable",
+      message: "Infrastructure report generated.",
       stack_name: input.stack_name,
       aws_region: input.aws_region,
       cluster_name: input.cluster_name,
       namespace: input.namespace,
       app_name: input.app_name,
-      application_url: service?.hostname ? `http://${service.hostname}` : undefined,
-      infra_summary: {
-        stack_name: input.stack_name,
-        cloudformation_status: report.cloudformation?.status,
-        cluster_name: input.cluster_name,
-        eks_status: (report.eks as { cluster_status?: string }).cluster_status,
-        namespace: input.namespace,
-        deployment: (report.kubernetes as { deployment_name?: string }).deployment_name,
-        service_hostname: service?.hostname,
-        monthly_cost_estimate_usd: cost.monthly_total_estimate
-      },
-      infra_report: report as unknown as Record<string, unknown>,
-      cleanup: report.cleanup,
+      application_url: typeof endpoint.url === "string" ? endpoint.url : undefined,
+      infra_summary: projection.infra_summary,
+      application_endpoint: projection.application_endpoint,
+      devops_report: projection.devops_report,
+      cleanup: projection.cleanup,
+      warnings: projection.warnings,
+      cost_estimate: projection.cost_estimate,
+      validation_checks: projection.validation_checks,
+      resource_inventory: projection.resource_inventory,
       report_warnings: report.report_warnings,
-      message: "Infrastructure report generated."
+      infra_report: report as unknown as Record<string, unknown>
     };
   }
 
@@ -384,10 +389,16 @@ export class BodhiClient {
       cost_notes: normalizeNotes(artifactBundle.cost_notes),
       security_notes: normalizeNotes(artifactBundle.security_notes),
       infra_details: executorResult.infra_details,
-      infra_report: executorResult.infra_report as unknown as Record<string, unknown> | undefined,
       infra_summary: executorResult.infra_summary,
+      application_endpoint: executorResult.application_endpoint,
+      devops_report: executorResult.devops_report,
       cleanup: executorResult.cleanup,
+      warnings: executorResult.warnings,
+      cost_estimate: executorResult.cost_estimate,
+      validation_checks: executorResult.validation_checks,
+      resource_inventory: executorResult.resource_inventory,
       report_warnings: executorResult.report_warnings,
+      infra_report: executorResult.infra_report as unknown as Record<string, unknown> | undefined,
       executor_logs: executorResult.commands.map((command) => ({
         command: command.command,
         exitCode: command.exitCode,

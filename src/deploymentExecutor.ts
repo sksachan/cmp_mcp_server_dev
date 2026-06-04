@@ -7,7 +7,7 @@ import type { DeployRequest } from "./schemas.js";
 import type { DeploymentArtifact, ValidatedArtifactBundle } from "./artifacts.js";
 import { sanitizeName } from "./naming.js";
 import { classifyCommandFailure, rollbackCompleteDiagnostic, type FailureDiagnostic } from "./failureClassifier.js";
-import { cleanupCommands, InfraReporter, type InfraReport } from "./infraReporter.js";
+import { buildDevopsReportProjection, cleanupCommands, InfraReporter, type InfraReport } from "./infraReporter.js";
 
 export type CommandRunner = (command: string, args: string[], options: { cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv }) => Promise<CommandResult>;
 
@@ -37,7 +37,13 @@ export type ExecutorResult = {
   infra_details?: Record<string, unknown>;
   infra_report?: InfraReport;
   infra_summary?: Record<string, unknown>;
+  application_endpoint?: Record<string, unknown>;
+  devops_report?: Record<string, unknown>;
   cleanup?: Record<string, unknown>;
+  warnings?: string[];
+  cost_estimate?: Record<string, unknown>;
+  validation_checks?: Array<Record<string, unknown>>;
+  resource_inventory?: Record<string, unknown>;
   report_warnings?: string[];
   message?: string;
 } & Partial<FailureDiagnostic>;
@@ -381,25 +387,30 @@ export class DeploymentExecutor {
   private async withInfraReport(base: ExecutorResult, stackName: string, region: string, appName: string, namespace: string, clusterName: string, imageMode?: string): Promise<ExecutorResult> {
     try {
       const infraReport = await this.reporter.buildReport({ stackName, region, appName, namespace, clusterName, imageMode });
-      const cost = infraReport.cost_estimate as { monthly_total_estimate?: number };
-      const service = infraReport.kubernetes?.service as { hostname?: string } | undefined;
+      const projection = buildDevopsReportProjection(infraReport, {
+        stackName,
+        region,
+        appName,
+        namespace,
+        clusterName,
+        awsAccountId: process.env.AWS_ACCOUNT_ID,
+        budgetTargetUsd: Number(process.env.DEFAULT_BUDGET_LIMIT_USD ?? 100)
+      });
+      const endpoint = projection.application_endpoint as { url?: string | null };
       return {
         ...base,
         status: infraReport.report_warnings?.length ? "deployed_with_report_warnings" : base.status,
-        infra_report: infraReport,
-        infra_summary: {
-          stack_name: base.stack_name,
-          cloudformation_status: infraReport.cloudformation?.status ?? base.cloudformation_status,
-          cluster_name: base.cluster_name,
-          eks_status: (infraReport.eks as { cluster_status?: string }).cluster_status,
-          namespace: base.namespace,
-          deployment: (infraReport.kubernetes as { deployment_name?: string }).deployment_name,
-          service_hostname: service?.hostname ?? base.service_hostname,
-          monthly_cost_estimate_usd: cost.monthly_total_estimate
-        },
-        cleanup: infraReport.cleanup,
+        infra_summary: projection.infra_summary,
+        application_endpoint: projection.application_endpoint,
+        devops_report: projection.devops_report,
+        cleanup: projection.cleanup,
+        warnings: projection.warnings,
+        cost_estimate: projection.cost_estimate,
+        validation_checks: projection.validation_checks,
+        resource_inventory: projection.resource_inventory,
         report_warnings: infraReport.report_warnings,
-        application_url: base.application_url ?? (service?.hostname ? `http://${service.hostname}` : undefined),
+        infra_report: infraReport,
+        application_url: base.application_url ?? (typeof endpoint.url === "string" ? endpoint.url : undefined),
         message: infraReport.report_warnings?.length
           ? "Deployment completed, but infrastructure report has warnings."
           : "Deployment completed and infrastructure report generated."

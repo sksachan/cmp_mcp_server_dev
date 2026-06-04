@@ -22,6 +22,17 @@ export interface InfraReport {
   report_warnings?: string[];
 }
 
+export type DevopsReportProjection = {
+  infra_summary: Record<string, unknown>;
+  application_endpoint: Record<string, unknown>;
+  devops_report: Record<string, unknown>;
+  cleanup: Record<string, unknown>;
+  warnings: string[];
+  cost_estimate: Record<string, unknown>;
+  validation_checks: Array<Record<string, unknown>>;
+  resource_inventory: Record<string, unknown>;
+};
+
 type StackResource = {
   logical_id?: string;
   physical_id?: string;
@@ -51,7 +62,7 @@ export class InfraReporter {
     const ecr = await this.discoverEcr(input, env, warnings, outputs.ECRRepositoryUri, stackResources);
     const kubernetes = await this.discoverKubernetes(input, env, warnings);
     const service = kubernetes.service as Record<string, unknown> | undefined;
-    const applicationUrl = stringValue(service, "hostname") ? `http://${stringValue(service, "hostname")}` : undefined;
+    const applicationUrl = stringValue(service, "application_url");
     const costEstimate = estimateCost({
       nodegroups: Array.isArray(eks.nodegroups) ? eks.nodegroups as Record<string, unknown>[] : [],
       natGatewayCount: Array.isArray(networking.nat_gateway_ids) ? networking.nat_gateway_ids.length : 0,
@@ -132,6 +143,7 @@ export class InfraReporter {
 
     const vpc = await this.readAwsJson("EC2 VPC", ["ec2", "describe-vpcs", "--vpc-ids", vpcId, "--region", input.region, "--output", "json"], env, warnings);
     const subnets = await this.readAwsJson("EC2 subnets", ["ec2", "describe-subnets", "--filters", `Name=vpc-id,Values=${vpcId}`, "--region", input.region, "--output", "json"], env, warnings);
+    const internetGateways = await this.readAwsJson("internet gateways", ["ec2", "describe-internet-gateways", "--filters", `Name=attachment.vpc-id,Values=${vpcId}`, "--region", input.region, "--output", "json"], env, warnings);
     const natGateways = await this.readAwsJson("NAT gateways", ["ec2", "describe-nat-gateways", "--filter", `Name=vpc-id,Values=${vpcId}`, "--region", input.region, "--output", "json"], env, warnings);
     const routeTables = await this.readAwsJson("route tables", ["ec2", "describe-route-tables", "--filters", `Name=vpc-id,Values=${vpcId}`, "--region", input.region, "--output", "json"], env, warnings);
     const securityGroups = await this.readAwsJson("security groups", ["ec2", "describe-security-groups", "--filters", `Name=vpc-id,Values=${vpcId}`, "--region", input.region, "--output", "json"], env, warnings);
@@ -142,7 +154,7 @@ export class InfraReporter {
       vpc_cidr: vpc.Vpcs?.[0]?.CidrBlock,
       public_subnets: subnetList.filter((subnet) => subnet.map_public_ip_on_launch === true),
       private_subnets: subnetList.filter((subnet) => subnet.map_public_ip_on_launch !== true),
-      internet_gateway_id: undefined,
+      internet_gateway_id: Array.isArray(internetGateways.InternetGateways) ? internetGateways.InternetGateways[0]?.InternetGatewayId : undefined,
       nat_gateway_ids: Array.isArray(natGateways.NatGateways) ? natGateways.NatGateways.map((item: Record<string, unknown>) => item.NatGatewayId).filter(Boolean) : [],
       route_table_ids: Array.isArray(routeTables.RouteTables) ? routeTables.RouteTables.map((item: Record<string, unknown>) => item.RouteTableId).filter(Boolean) : [],
       security_group_ids: Array.isArray(securityGroups.SecurityGroups) ? securityGroups.SecurityGroups.map((item: Record<string, unknown>) => item.GroupId).filter(Boolean) : []
@@ -203,14 +215,19 @@ export class InfraReporter {
       || {};
     const service = await this.readKubectlJson("service", ["get", "svc", input.appName, "-n", input.namespace, "-o", "json"], env, warnings)
       || await this.readKubectlJson("service app-svc fallback", ["get", "svc", `${input.appName}-svc`, "-n", input.namespace, "-o", "json"], env, warnings)
-      || await this.readKubectlJson("service fallback", ["get", "svc", "hello-world-svc", "-n", input.namespace, "-o", "json"], env, warnings)
       || selectSingle(await this.readKubectlJson("service by app label", ["get", "svc", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings))
       || selectSingle(await this.readKubectlJson("service by hello-world label", ["get", "svc", "-n", input.namespace, "-l", "app=hello-world", "-o", "json"], env, warnings))
+      || await this.readKubectlJson("service fallback", ["get", "svc", "hello-world-svc", "-n", input.namespace, "-o", "json"], env, warnings)
       || this.warnSingle("service", selectSingle(await this.readKubectlJson("single service", ["get", "svc", "-n", input.namespace, "-o", "json"], env, warnings)), warnings)
       || {};
     const podsData = await this.readKubectlJson("pods", ["get", "pods", "-n", input.namespace, "-o", "json"], env, warnings) || {};
     const pods = Array.isArray(podsData.items) ? podsData.items.map(summarizePod) : [];
     const hostname = service.status?.loadBalancer?.ingress?.[0]?.hostname;
+    const ports = Array.isArray(service.spec?.ports) ? service.spec.ports.map((port: Record<string, unknown>) => ({
+      port: port.port,
+      targetPort: port.targetPort,
+      protocol: port.protocol
+    })) : [];
     return {
       namespace: input.namespace,
       deployment_name: deployment.metadata?.name,
@@ -221,12 +238,14 @@ export class InfraReporter {
       service: {
         name: service.metadata?.name,
         type: service.spec?.type,
+        selector: service.spec?.selector,
         hostname,
-        ports: Array.isArray(service.spec?.ports) ? service.spec.ports.map((port: Record<string, unknown>) => ({
-          port: port.port,
-          targetPort: port.targetPort,
-          protocol: port.protocol
-        })) : []
+        load_balancer_hostname: hostname,
+        application_url: hostname ? `http://${hostname}` : undefined,
+        endpoint_status: hostname ? "ready" : "pending",
+        endpoint_message: hostname ? undefined : "LoadBalancer hostname not yet assigned. Retry in 2-3 minutes.",
+        ports,
+        target_ports: ports.map((port: Record<string, unknown>) => port.targetPort).filter(Boolean)
       }
     };
   }
@@ -289,7 +308,174 @@ export function cleanupCommands(stackName: string, region: string): Record<strin
   return {
     delete_stack_command: `aws cloudformation delete-stack --stack-name ${stackName} --region ${region}`,
     wait_delete_command: `aws cloudformation wait stack-delete-complete --stack-name ${stackName} --region ${region}`,
-    verify_delete_command: `aws cloudformation describe-stacks --stack-name ${stackName} --region ${region}`
+    verify_delete_command: `aws cloudformation describe-stacks --stack-name ${stackName} --region ${region}`,
+    note: "CloudFormation stack deletion should remove EKS, node group, VPC, NAT Gateway, ECR repository and log group unless deletion policies or external dependencies block deletion."
+  };
+}
+
+export function buildDevopsReportProjection(report: InfraReport, input: {
+  stackName: string;
+  region: string;
+  appName?: string;
+  namespace?: string;
+  clusterName?: string;
+  awsAccountId?: string;
+  budgetTargetUsd?: number;
+}): DevopsReportProjection {
+  const service = report.kubernetes.service as Record<string, any> | undefined;
+  const firstPort = Array.isArray(service?.ports) ? service.ports[0] as Record<string, unknown> | undefined : undefined;
+  const endpointStatus = service?.hostname ? "ready" : service?.endpoint_status ?? "pending";
+  const applicationUrl = service?.application_url ?? (service?.hostname ? `http://${service.hostname}` : null);
+  const eks = report.eks as Record<string, any>;
+  const nodegroups = Array.isArray(eks.nodegroups) ? eks.nodegroups as Record<string, any>[] : [];
+  const nodegroup = nodegroups[0] ?? {};
+  const kubernetes = report.kubernetes as Record<string, any>;
+  const pods = Array.isArray(kubernetes.pods) ? kubernetes.pods as Record<string, unknown>[] : [];
+  const podsRunning = pods.filter((pod) => pod.phase === "Running").length;
+  const replicasDesired = numberValue(kubernetes.replicas_desired) ?? 0;
+  const replicasAvailable = numberValue(kubernetes.replicas_available) ?? 0;
+  const rolloutStatus = replicasDesired > 0 && replicasAvailable >= replicasDesired ? "success" : "unknown";
+  const networking = report.networking as Record<string, any>;
+  const ecr = report.container_registry as Record<string, any>;
+  const cleanup = report.cleanup;
+  const costEstimate = normalizeTopLevelCost(report.cost_estimate, input.budgetTargetUsd ?? 100);
+  const warnings = [
+    ...stringArray(report.report_warnings),
+    ...stringArray(costEstimate.warnings)
+  ];
+  const publicSubnets = Array.isArray(networking.public_subnets) ? networking.public_subnets as Record<string, unknown>[] : [];
+  const privateSubnets = Array.isArray(networking.private_subnets) ? networking.private_subnets as Record<string, unknown>[] : [];
+  const resourceInventory = {
+    vpc_id: networking.vpc_id,
+    vpc_cidr: networking.vpc_cidr,
+    public_subnet_ids: publicSubnets.map((subnet) => subnet.subnet_id).filter(Boolean),
+    private_subnet_ids: privateSubnets.map((subnet) => subnet.subnet_id).filter(Boolean),
+    nat_gateway_ids: networking.nat_gateway_ids ?? [],
+    internet_gateway_id: networking.internet_gateway_id,
+    security_group_ids: networking.security_group_ids ?? [],
+    nodegroup_name: nodegroup.name,
+    node_instance_types: nodegroup.instance_types ?? [],
+    ecr_repository_uri: ecr.ecr_repository_uri,
+    cloudwatch_log_group: `/aws/eks/${input.clusterName ?? eks.cluster_name}/cluster`
+  };
+  const validationChecks = [
+    { check: "CloudFormation stack", status: report.cloudformation.status === "CREATE_COMPLETE" || report.cloudformation.status === "UPDATE_COMPLETE" ? "pass" : "unknown", detail: report.cloudformation.status },
+    { check: "EKS cluster", status: eks.cluster_status === "ACTIVE" ? "pass" : "unknown", detail: eks.cluster_status },
+    { check: "EKS node group", status: nodegroup.status === "ACTIVE" ? "pass" : "unknown", detail: nodegroup.status ? `${nodegroup.status}, desired ${nodegroup.desired_size ?? "unknown"}` : undefined },
+    { check: "Kubernetes rollout", status: rolloutStatus === "success" ? "pass" : "unknown", detail: kubernetes.deployment_name ? `Deployment ${kubernetes.deployment_name} rollout ${rolloutStatus}` : undefined },
+    { check: "LoadBalancer endpoint", status: endpointStatus === "ready" ? "pass" : "pending", detail: endpointStatus === "ready" ? "hostname assigned" : "hostname pending" }
+  ];
+  const applicationEndpoint = {
+    status: endpointStatus,
+    service_name: service?.name ?? null,
+    service_type: service?.type ?? null,
+    hostname: service?.hostname ?? null,
+    url: applicationUrl,
+    port: firstPort?.port ?? null,
+    target_port: firstPort?.targetPort ?? null,
+    validation_command: applicationUrl ? `curl -I ${applicationUrl}` : null,
+    endpoint_message: endpointStatus === "ready" ? undefined : "LoadBalancer hostname not yet assigned. Retry in 2-3 minutes."
+  };
+  const infraSummary = {
+    stack_name: input.stackName,
+    cloudformation_status: report.cloudformation.status,
+    cluster_name: input.clusterName ?? eks.cluster_name,
+    eks_status: eks.cluster_status,
+    namespace: input.namespace ?? kubernetes.namespace,
+    deployment: kubernetes.deployment_name,
+    deployment_rollout_status: rolloutStatus,
+    service_name: service?.name ?? null,
+    service_type: service?.type ?? null,
+    service_hostname: service?.hostname ?? null,
+    application_url: applicationUrl,
+    endpoint_status: endpointStatus === "ready" ? undefined : endpointStatus,
+    endpoint_message: endpointStatus === "ready" ? undefined : "LoadBalancer hostname not yet assigned. Retry in 2-3 minutes.",
+    monthly_cost_estimate_usd: costEstimate.monthly_total_estimate,
+    cleanup_command: cleanup.delete_stack_command
+  };
+  const kubernetesSummary = {
+    namespace: input.namespace ?? kubernetes.namespace,
+    deployment_name: kubernetes.deployment_name,
+    deployment_rollout_status: rolloutStatus,
+    replicas_desired: replicasDesired,
+    replicas_available: replicasAvailable,
+    pods_running: podsRunning,
+    pods_not_ready: Math.max(replicasDesired - replicasAvailable, 0),
+    service_name: service?.name,
+    service_type: service?.type,
+    service_hostname: service?.hostname,
+    application_url: applicationUrl
+  };
+  const devopsReport = {
+    deployment_status: {
+      status: endpointStatus === "ready" && rolloutStatus === "success" ? "deployed" : "deployed_pending_endpoint",
+      rollout_status: rolloutStatus,
+      endpoint_status: endpointStatus
+    },
+    application_endpoint: applicationEndpoint,
+    aws_identity: {
+      account_id: input.awsAccountId,
+      region: input.region
+    },
+    cloudformation: {
+      stack_name: input.stackName,
+      status: report.cloudformation.status,
+      stack_id: report.cloudformation.stack_id
+    },
+    eks: {
+      cluster_name: input.clusterName ?? eks.cluster_name,
+      status: eks.cluster_status,
+      version: eks.kubernetes_version,
+      endpoint: eks.endpoint,
+      nodegroup_name: nodegroup.name,
+      nodegroup_status: nodegroup.status,
+      desired_size: nodegroup.desired_size,
+      min_size: nodegroup.min_size,
+      max_size: nodegroup.max_size,
+      instance_types: nodegroup.instance_types
+    },
+    kubernetes: kubernetesSummary,
+    networking: {
+      vpc_id: networking.vpc_id,
+      vpc_cidr: networking.vpc_cidr,
+      public_subnet_ids: resourceInventory.public_subnet_ids,
+      private_subnet_ids: resourceInventory.private_subnet_ids,
+      nat_gateway_ids: resourceInventory.nat_gateway_ids,
+      security_group_ids: resourceInventory.security_group_ids
+    },
+    container_registry: {
+      repository_name: ecr.ecr_repository_name,
+      repository_uri: ecr.ecr_repository_uri,
+      image_mode: ecr.image_mode,
+      image_uri: ecr.image_uri
+    },
+    observability: {
+      cloudwatch_log_group: resourceInventory.cloudwatch_log_group
+    },
+    cost_estimate: costEstimate,
+    security_posture: {
+      public_endpoint: endpointStatus === "ready",
+      service_type: service?.type,
+      image_mode: ecr.image_mode,
+      notes: ["No credentials, kubeconfig, service account tokens, or Kubernetes secrets are included in this report."]
+    },
+    cleanup,
+    validation_checks: validationChecks,
+    warnings,
+    recommended_next_actions: endpointStatus === "ready"
+      ? ["Validate the endpoint with the provided curl command.", "Delete the stack after the demo to avoid ongoing charges."]
+      : ["Retry the infra report in 2-3 minutes for the LoadBalancer hostname.", "Do not consider the endpoint ready until hostname is assigned."]
+  };
+
+  return {
+    infra_summary: infraSummary,
+    application_endpoint: applicationEndpoint,
+    devops_report: devopsReport,
+    cleanup,
+    warnings,
+    cost_estimate: costEstimate,
+    validation_checks: validationChecks,
+    resource_inventory: resourceInventory
   };
 }
 
@@ -334,6 +520,29 @@ function parseJsonObject(value: string, label: string, warnings: string[]): Reco
     warnings.push(`Could not parse ${label} JSON response.`);
     return {};
   }
+}
+
+function normalizeTopLevelCost(cost: Record<string, unknown>, budgetTargetUsd: number): Record<string, unknown> {
+  const total = numberValue(cost.monthly_total_estimate) ?? 138;
+  return {
+    currency: cost.currency ?? "USD",
+    monthly_total_estimate: total,
+    confidence: cost.confidence ?? "medium",
+    budget_target_usd: budgetTargetUsd,
+    budget_exceeded: total > budgetTargetUsd,
+    line_items: Array.isArray(cost.line_items) ? cost.line_items : [
+      { service: "Amazon EKS Control Plane", monthly_estimate: 73, notes: "$0.10/hour approximation" },
+      { service: "EC2 worker node", monthly_estimate: 15, notes: "1 x t3.small on-demand approximation" },
+      { service: "NAT Gateway", monthly_estimate: 32, notes: "Hourly charge only; data processing excluded" },
+      { service: "Load Balancer", monthly_estimate: 16, notes: "Approximate low-traffic ELB estimate" },
+      { service: "ECR + CloudWatch Logs + EBS", monthly_estimate: 2, notes: "Small POC footprint" }
+    ],
+    warnings: [
+      "Actual cost may exceed estimate due to data transfer and load balancer usage.",
+      "EKS control plane and NAT Gateway accrue hourly charges even when idle.",
+      "Delete the stack after demo to avoid ongoing charges."
+    ]
+  };
 }
 
 function selectSingle(value: Record<string, any> | null): Record<string, any> | null {

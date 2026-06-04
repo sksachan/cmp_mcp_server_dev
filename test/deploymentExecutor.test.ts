@@ -486,6 +486,9 @@ describe("DeploymentExecutor", () => {
           stderr: ""
         };
       }
+      if (command === "aws" && args[0] === "ec2" && args[1] === "describe-internet-gateways") {
+        return { command: [command, ...args].join(" "), exitCode: 0, stdout: JSON.stringify({ InternetGateways: [{ InternetGatewayId: "igw-123" }] }), stderr: "" };
+      }
       if (command === "aws" && args[0] === "ec2" && args[1] === "describe-nat-gateways") {
         return { command: [command, ...args].join(" "), exitCode: 0, stdout: JSON.stringify({ NatGateways: [{ NatGatewayId: "nat-123", State: "available" }] }), stderr: "" };
       }
@@ -580,6 +583,21 @@ describe("DeploymentExecutor", () => {
     expect(result.image_mode).toBe("public_nginx_unprivileged");
     expect(result.service_hostname).toBe("abc.elb.amazonaws.com");
     expect(result.application_url).toBe("http://abc.elb.amazonaws.com");
+    expect(result.infra_summary).toMatchObject({
+      service_hostname: "abc.elb.amazonaws.com",
+      application_url: "http://abc.elb.amazonaws.com",
+      monthly_cost_estimate_usd: 138
+    });
+    expect(result.application_endpoint).toMatchObject({
+      status: "ready",
+      url: "http://abc.elb.amazonaws.com"
+    });
+    expect(result.devops_report).toHaveProperty("validation_checks");
+    expect(result.cleanup).toHaveProperty("delete_stack_command");
+    expect(result.resource_inventory).toMatchObject({
+      vpc_id: "vpc-123",
+      internet_gateway_id: "igw-123"
+    });
     expect(result.infra_details?.node_instance_type).toBe("t3.small");
     expect(result.infra_details?.node_desired_capacity).toBe(1);
     expect(result.infra_details?.kubernetes_version).toBe("1.29");
