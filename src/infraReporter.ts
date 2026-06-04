@@ -40,6 +40,13 @@ type StackResource = {
   status?: string;
 };
 
+type KubernetesDiscoveryDiagnostics = {
+  kubeconfig_updated: boolean;
+  attempted_context_cluster: string;
+  commands: Array<{ command: string; exitCode: number; stderr_summary?: string }>;
+  discovery_status: "success" | "partial" | "failed";
+};
+
 export class InfraReporter {
   private readonly commandRunner: CommandRunner;
   private readonly timeoutMs: number;
@@ -207,27 +214,42 @@ export class InfraReporter {
   }
 
   private async discoverKubernetes(input: InfraReportInput, env: NodeJS.ProcessEnv, warnings: string[]): Promise<Record<string, unknown>> {
-    const deployment = await this.readKubectlJson("deployment", ["get", "deployment", input.appName, "-n", input.namespace, "-o", "json"], env, warnings)
-      || await this.readKubectlJson("deployment fallback", ["get", "deployment", "hello-world", "-n", input.namespace, "-o", "json"], env, warnings)
-      || selectSingle(await this.readKubectlJson("deployment by app label", ["get", "deployment", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings))
-      || selectSingle(await this.readKubectlJson("deployment by hello-world label", ["get", "deployment", "-n", input.namespace, "-l", "app=hello-world", "-o", "json"], env, warnings))
-      || this.warnSingle("deployment", selectSingle(await this.readKubectlJson("single deployment", ["get", "deployment", "-n", input.namespace, "-o", "json"], env, warnings)), warnings)
+    const diagnostics: KubernetesDiscoveryDiagnostics = {
+      kubeconfig_updated: false,
+      attempted_context_cluster: input.clusterName,
+      commands: [],
+      discovery_status: "failed"
+    };
+    const kubeconfig = await this.run("aws", ["eks", "update-kubeconfig", "--name", input.clusterName, "--region", input.region], env);
+    recordDiscoveryCommand(diagnostics, kubeconfig);
+    diagnostics.kubeconfig_updated = kubeconfig.exitCode === 0;
+    if (kubeconfig.exitCode !== 0) warnings.push(`Could not update kubeconfig for Kubernetes discovery: ${shortError(kubeconfig)}`);
+
+    const deployment = await this.readKubectlJson("deployment", ["get", "deployment", input.appName, "-n", input.namespace, "-o", "json"], env, warnings, diagnostics)
+      || selectSingle(await this.readKubectlJson("deployment by app label", ["get", "deployment", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings, diagnostics))
+      || selectSingle(await this.readKubectlJson("deployment by hello-world label", ["get", "deployment", "-n", input.namespace, "-l", "app=hello-world", "-o", "json"], env, warnings, diagnostics))
+      || await this.readKubectlJson("deployment fallback", ["get", "deployment", "hello-world", "-n", input.namespace, "-o", "json"], env, warnings, diagnostics)
+      || this.warnSingle("deployment", selectSingle(await this.readKubectlJson("single deployment", ["get", "deployment", "-n", input.namespace, "-o", "json"], env, warnings, diagnostics)), warnings)
       || {};
-    const service = await this.readKubectlJson("service", ["get", "svc", input.appName, "-n", input.namespace, "-o", "json"], env, warnings)
-      || await this.readKubectlJson("service app-svc fallback", ["get", "svc", `${input.appName}-svc`, "-n", input.namespace, "-o", "json"], env, warnings)
-      || selectSingle(await this.readKubectlJson("service by app label", ["get", "svc", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings))
-      || selectSingle(await this.readKubectlJson("service by hello-world label", ["get", "svc", "-n", input.namespace, "-l", "app=hello-world", "-o", "json"], env, warnings))
-      || await this.readKubectlJson("service fallback", ["get", "svc", "hello-world-svc", "-n", input.namespace, "-o", "json"], env, warnings)
-      || this.warnSingle("service", selectSingle(await this.readKubectlJson("single service", ["get", "svc", "-n", input.namespace, "-o", "json"], env, warnings)), warnings)
+    const service = await this.readKubectlJson("service", ["get", "svc", input.appName, "-n", input.namespace, "-o", "json"], env, warnings, diagnostics)
+      || await this.readKubectlJson("service app-svc fallback", ["get", "svc", `${input.appName}-svc`, "-n", input.namespace, "-o", "json"], env, warnings, diagnostics)
+      || selectSingle(await this.readKubectlJson("service by app label", ["get", "svc", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings, diagnostics))
+      || selectSingle(await this.readKubectlJson("service by hello-world label", ["get", "svc", "-n", input.namespace, "-l", "app=hello-world", "-o", "json"], env, warnings, diagnostics))
+      || this.warnSingle("LoadBalancer service", selectSingleLoadBalancer(await this.readKubectlJson("single LoadBalancer service", ["get", "svc", "-n", input.namespace, "-o", "json"], env, warnings, diagnostics)), warnings)
       || {};
-    const podsData = await this.readKubectlJson("pods", ["get", "pods", "-n", input.namespace, "-o", "json"], env, warnings) || {};
-    const pods = Array.isArray(podsData.items) ? podsData.items.map(summarizePod) : [];
+    const podsData = await this.readKubectlJson("pods by app label", ["get", "pods", "-n", input.namespace, "-l", `app=${input.appName}`, "-o", "json"], env, warnings, diagnostics);
+    const podsDiscovered = Boolean(podsData && Array.isArray(podsData.items));
+    const pods = podsDiscovered && podsData ? podsData.items.map(summarizePod) : undefined;
     const hostname = service.status?.loadBalancer?.ingress?.[0]?.hostname;
     const ports = Array.isArray(service.spec?.ports) ? service.spec.ports.map((port: Record<string, unknown>) => ({
       port: port.port,
       targetPort: port.targetPort,
       protocol: port.protocol
     })) : [];
+    const hasDeployment = Boolean(deployment.metadata?.name);
+    const hasService = Boolean(service.metadata?.name);
+    const kubectlSuccesses = [hasDeployment, podsDiscovered, hasService].filter(Boolean).length;
+    diagnostics.discovery_status = kubectlSuccesses === 3 && diagnostics.kubeconfig_updated ? "success" : kubectlSuccesses > 0 ? "partial" : "failed";
     return {
       namespace: input.namespace,
       deployment_name: deployment.metadata?.name,
@@ -235,6 +257,7 @@ export class InfraReporter {
       replicas_available: deployment.status?.availableReplicas,
       image: deployment.spec?.template?.spec?.containers?.[0]?.image,
       pods,
+      pods_discovered: podsDiscovered,
       service: {
         name: service.metadata?.name,
         type: service.spec?.type,
@@ -246,7 +269,8 @@ export class InfraReporter {
         endpoint_message: hostname ? undefined : "LoadBalancer hostname not yet assigned. Retry in 2-3 minutes.",
         ports,
         target_ports: ports.map((port: Record<string, unknown>) => port.targetPort).filter(Boolean)
-      }
+      },
+      kubernetes_discovery: diagnostics
     };
   }
 
@@ -259,8 +283,9 @@ export class InfraReporter {
     return parseJsonObject(result.stdout, label, warnings);
   }
 
-  private async readKubectlJson(label: string, args: string[], env: NodeJS.ProcessEnv, warnings: string[]): Promise<Record<string, any> | null> {
+  private async readKubectlJson(label: string, args: string[], env: NodeJS.ProcessEnv, warnings: string[], diagnostics?: KubernetesDiscoveryDiagnostics): Promise<Record<string, any> | null> {
     const result = await this.run("kubectl", args, env);
+    if (diagnostics) recordDiscoveryCommand(diagnostics, result);
     if (result.exitCode !== 0) return null;
     return parseJsonObject(result.stdout, label, warnings);
   }
@@ -331,10 +356,11 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
   const nodegroup = nodegroups[0] ?? {};
   const kubernetes = report.kubernetes as Record<string, any>;
   const pods = Array.isArray(kubernetes.pods) ? kubernetes.pods as Record<string, unknown>[] : [];
-  const podsRunning = pods.filter((pod) => pod.phase === "Running").length;
-  const replicasDesired = numberValue(kubernetes.replicas_desired) ?? 0;
-  const replicasAvailable = numberValue(kubernetes.replicas_available) ?? 0;
-  const rolloutStatus = replicasDesired > 0 && replicasAvailable >= replicasDesired ? "success" : "unknown";
+  const podsDiscovered = kubernetes.pods_discovered === true;
+  const podsRunning = podsDiscovered ? pods.filter((pod) => pod.phase === "Running").length : null;
+  const replicasDesired = numberValue(kubernetes.replicas_desired);
+  const replicasAvailable = numberValue(kubernetes.replicas_available);
+  const rolloutStatus = (replicasDesired ?? 0) > 0 && (replicasAvailable ?? 0) >= (replicasDesired ?? 0) ? "success" : "unknown";
   const networking = report.networking as Record<string, any>;
   const ecr = report.container_registry as Record<string, any>;
   const cleanup = report.cleanup;
@@ -400,11 +426,12 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
     replicas_desired: replicasDesired,
     replicas_available: replicasAvailable,
     pods_running: podsRunning,
-    pods_not_ready: Math.max(replicasDesired - replicasAvailable, 0),
+    pods_not_ready: replicasDesired === undefined || replicasAvailable === undefined ? null : Math.max(replicasDesired - replicasAvailable, 0),
     service_name: service?.name,
     service_type: service?.type,
     service_hostname: service?.hostname,
-    application_url: applicationUrl
+    application_url: applicationUrl,
+    kubernetes_discovery: kubernetes.kubernetes_discovery
   };
   const devopsReport = {
     deployment_status: {
@@ -435,6 +462,7 @@ export function buildDevopsReportProjection(report: InfraReport, input: {
       instance_types: nodegroup.instance_types
     },
     kubernetes: kubernetesSummary,
+    kubernetes_discovery: kubernetes.kubernetes_discovery,
     networking: {
       vpc_id: networking.vpc_id,
       vpc_cidr: networking.vpc_cidr,
@@ -548,6 +576,22 @@ function normalizeTopLevelCost(cost: Record<string, unknown>, budgetTargetUsd: n
 function selectSingle(value: Record<string, any> | null): Record<string, any> | null {
   const items = value?.items;
   return Array.isArray(items) && items.length === 1 ? items[0] : null;
+}
+
+function selectSingleLoadBalancer(value: Record<string, any> | null): Record<string, any> | null {
+  const items = value?.items;
+  if (!Array.isArray(items)) return null;
+  const loadBalancers = items.filter((item) => item?.spec?.type === "LoadBalancer");
+  return loadBalancers.length === 1 ? loadBalancers[0] : null;
+}
+
+function recordDiscoveryCommand(diagnostics: KubernetesDiscoveryDiagnostics, result: CommandResult): void {
+  const stderr = result.stderr.trim();
+  diagnostics.commands.push({
+    command: result.command,
+    exitCode: result.exitCode,
+    stderr_summary: stderr ? stderr.slice(0, 300) : undefined
+  });
 }
 
 function availableReplicas(kubernetes: Record<string, unknown>): number {

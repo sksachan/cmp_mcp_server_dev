@@ -66,6 +66,13 @@ describe("InfraReporter", () => {
     ]);
     expect(JSON.stringify(projection)).not.toContain("SecretAccessKey");
     expect(JSON.stringify(report)).not.toContain("SecretAccessKey");
+    expect(commands[commands.findIndex((command) => command.includes("kubectl get deployment")) - 1]).toContain("aws eks update-kubeconfig");
+    expect(report.kubernetes.kubernetes_discovery).toMatchObject({
+      kubeconfig_updated: true,
+      attempted_context_cluster: "hello-world-demo-v2",
+      discovery_status: "success"
+    });
+    expect((report.kubernetes.kubernetes_discovery as { commands: unknown[] }).commands.length).toBeGreaterThan(3);
     expect(commands.some((command) => command.includes("sam deploy"))).toBe(false);
     expect(commands.some((command) => command.includes("kubectl apply"))).toBe(false);
   });
@@ -140,6 +147,83 @@ describe("InfraReporter", () => {
     });
   });
 
+  it("discovers service by app label when exact and app-svc services are absent", async () => {
+    const commands: string[] = [];
+    const reporter = new InfraReporter((command, args) => {
+      commands.push([command, ...args].join(" "));
+      return jsonCommand(command, args, { exactServiceMissing: true, appSvcMissing: true });
+    });
+    const report = await reporter.buildReport({
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+
+    expect(commands.some((command) => command.includes("kubectl get svc -n hello-world-v2 -l app=hello-world-v2"))).toBe(true);
+    expect(report.kubernetes.service).toMatchObject({
+      name: "hello-world-v2-label",
+      hostname: "abc.elb.amazonaws.com"
+    });
+  });
+
+  it("discovers the only LoadBalancer service in the namespace with a warning", async () => {
+    const reporter = new InfraReporter((command, args) => jsonCommand(command, args, {
+      exactServiceMissing: true,
+      appSvcMissing: true,
+      labelServiceMissing: true,
+      singleLoadBalancerFallback: true
+    }));
+    const report = await reporter.buildReport({
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+
+    expect(report.kubernetes.service).toMatchObject({
+      name: "namespace-lb",
+      type: "LoadBalancer",
+      hostname: "abc.elb.amazonaws.com"
+    });
+    expect(report.report_warnings?.some((warning) => warning.includes("LoadBalancer service"))).toBe(true);
+  });
+
+
+  it("returns Kubernetes diagnostics and null pod counts when kubectl discovery fails", async () => {
+    const reporter = new InfraReporter((command, args) => {
+      if (command === "kubectl") return Promise.resolve(result(command, args, 1, "", "context deadline exceeded"));
+      return jsonCommand(command, args);
+    });
+    const report = await reporter.buildReport({
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+    const projection = buildDevopsReportProjection(report, {
+      stackName: "hello-world-v2-dev-eks",
+      region: "us-east-1",
+      appName: "hello-world-v2",
+      namespace: "hello-world-v2",
+      clusterName: "hello-world-demo-v2"
+    });
+
+    expect(report.kubernetes.kubernetes_discovery).toMatchObject({
+      kubeconfig_updated: true,
+      discovery_status: "failed"
+    });
+    expect(projection.devops_report.kubernetes).toMatchObject({
+      pods_running: null,
+      service_name: undefined,
+      service_hostname: undefined
+    });
+    expect(JSON.stringify(report.kubernetes.kubernetes_discovery)).toContain("context deadline exceeded");
+  });
+
   it("uses realistic POC cost assumptions and warnings", () => {
     const estimate = estimateCost({
       nodegroups: [{ instance_types: ["t3.small"], desired_size: 1 }],
@@ -153,7 +237,13 @@ describe("InfraReporter", () => {
   });
 });
 
-function jsonCommand(command: string, args: string[], options: { omitHostname?: boolean; exactServiceMissing?: boolean } = {}): Promise<CommandResult> {
+function jsonCommand(command: string, args: string[], options: {
+  omitHostname?: boolean;
+  exactServiceMissing?: boolean;
+  appSvcMissing?: boolean;
+  labelServiceMissing?: boolean;
+  singleLoadBalancerFallback?: boolean;
+} = {}): Promise<CommandResult> {
   const key = [command, ...args].join(" ");
   if (key.includes("cloudformation describe-stacks")) {
     return Promise.resolve(result(command, args, 0, JSON.stringify({
@@ -189,11 +279,39 @@ function jsonCommand(command: string, args: string[], options: { omitHostname?: 
   if (key.includes("eks describe-cluster")) return Promise.resolve(result(command, args, 0, JSON.stringify({ cluster: { name: "hello-world-demo-v2", arn: "arn:eks", status: "ACTIVE", version: "1.29", endpoint: "https://cluster.example" } })));
   if (key.includes("eks list-nodegroups")) return Promise.resolve(result(command, args, 0, JSON.stringify({ nodegroups: ["ng-1"] })));
   if (key.includes("eks describe-nodegroup")) return Promise.resolve(result(command, args, 0, JSON.stringify({ nodegroup: { nodegroupName: "ng-1", status: "ACTIVE", instanceTypes: ["t3.small"], scalingConfig: { desiredSize: 1, minSize: 1, maxSize: 2 }, subnets: ["subnet-1"], nodeRole: "arn:role" } })));
+  if (key.includes("eks update-kubeconfig")) return Promise.resolve(result(command, args, 0, "Updated context", ""));
   if (key.includes("ecr describe-repositories")) return Promise.resolve(result(command, args, 0, JSON.stringify({ repositories: [{ repositoryName: "hello-world-v2-dev", repositoryUri: "051370627449.dkr.ecr.us-east-1.amazonaws.com/hello-world-v2-dev", imageScanningConfiguration: { scanOnPush: true }, encryptionConfiguration: { encryptionType: "AES256" } }] })));
   if (key.includes("ecr describe-images")) return Promise.resolve(result(command, args, 0, JSON.stringify({ imageDetails: [] })));
   if (key.includes("kubectl get deployment")) return Promise.resolve(result(command, args, 0, JSON.stringify({ metadata: { name: "hello-world-v2" }, spec: { replicas: 1, template: { spec: { containers: [{ image: "nginxinc/nginx-unprivileged:alpine" }] } } }, status: { availableReplicas: 1 } })));
   if (key.includes("kubectl get pods")) return Promise.resolve(result(command, args, 0, JSON.stringify({ items: [{ metadata: { name: "pod-1" }, spec: { nodeName: "node-1" }, status: { phase: "Running", podIP: "10.0.1.10", containerStatuses: [{ restartCount: 0 }] } }] })));
   if (key.includes("kubectl get svc hello-world-v2 ") && options.exactServiceMissing) return Promise.resolve(result(command, args, 1, "", "not found"));
+  if (key.includes("kubectl get svc hello-world-v2-svc") && options.appSvcMissing) return Promise.resolve(result(command, args, 1, "", "not found"));
+  if (key.includes("kubectl get svc -n hello-world-v2 -l app=hello-world-v2") && options.labelServiceMissing) return Promise.resolve(result(command, args, 0, JSON.stringify({ items: [] })));
+  if (key.includes("kubectl get svc -n hello-world-v2 -l app=hello-world-v2")) {
+    return Promise.resolve(result(command, args, 0, JSON.stringify({
+      items: [{
+        metadata: { name: "hello-world-v2-label" },
+        spec: { type: "LoadBalancer", selector: { app: "hello-world-v2" }, ports: [{ port: 80, targetPort: "http", protocol: "TCP" }] },
+        status: { loadBalancer: { ingress: options.omitHostname ? [] : [{ hostname: "abc.elb.amazonaws.com" }] } }
+      }]
+    })));
+  }
+  if (key.includes("kubectl get svc -n hello-world-v2 -o json") && options.singleLoadBalancerFallback) {
+    return Promise.resolve(result(command, args, 0, JSON.stringify({
+      items: [
+        {
+          metadata: { name: "internal-service" },
+          spec: { type: "ClusterIP", ports: [{ port: 80, targetPort: "http", protocol: "TCP" }] },
+          status: {}
+        },
+        {
+          metadata: { name: "namespace-lb" },
+          spec: { type: "LoadBalancer", selector: { app: "hello-world-v2" }, ports: [{ port: 80, targetPort: "http", protocol: "TCP" }] },
+          status: { loadBalancer: { ingress: [{ hostname: "abc.elb.amazonaws.com" }] } }
+        }
+      ]
+    })));
+  }
   if (key.includes("kubectl get svc")) {
     const name = key.includes("hello-world-v2-svc") ? "hello-world-v2-svc" : "hello-world-v2";
     return Promise.resolve(result(command, args, 0, JSON.stringify({
