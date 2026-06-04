@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BodhiClient } from "./bodhiClient.js";
-import { ArtifactStatusRequestSchema, DeploymentStatusRequestSchema, DeployRequestSchema, ExecuteDeploymentRequestSchema } from "./schemas.js";
+import { ArtifactStatusRequestSchema, DeploymentStatusRequestSchema, DeployRequestSchema, ExecuteDeploymentRequestSchema, InfraReportRequestSchema } from "./schemas.js";
 
 export function createMcpServer(bodhiClient: BodhiClient): McpServer {
   const server = new McpServer({
@@ -60,6 +60,19 @@ export function createMcpServer(bodhiClient: BodhiClient): McpServer {
       _meta: { securitySchemes }
     } as Parameters<McpServer["registerTool"]>[1],
     async (input) => toolResponse(await bodhiClient.getDeploymentStatus(DeploymentStatusRequestSchema.parse(input)))
+  );
+
+  server.registerTool(
+    "get_hello_world_eks_infra_report",
+    {
+      title: "Get Hello World EKS Infrastructure Report",
+      description:
+        "Read-only. Discovers CloudFormation, EKS, EC2/VPC, ECR, Kubernetes service/pod details and returns a sanitized infrastructure report with cost estimates. Does not create, update, or delete resources.",
+      inputSchema: InfraReportRequestSchema.shape,
+      securitySchemes,
+      _meta: { securitySchemes }
+    } as Parameters<McpServer["registerTool"]>[1],
+    async (input) => toolResponse(await bodhiClient.getInfraReport(InfraReportRequestSchema.parse(input)))
   );
 
   return server;

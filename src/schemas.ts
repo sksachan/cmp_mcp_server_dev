@@ -37,6 +37,16 @@ export const ExecuteDeploymentRequestSchema = z.object({
 
 export type ExecuteDeploymentRequest = z.infer<typeof ExecuteDeploymentRequestSchema>;
 
+export const InfraReportRequestSchema = z.object({
+  stack_name: z.string().trim().min(1),
+  aws_region: z.string().trim().min(1),
+  cluster_name: z.string().trim().optional(),
+  namespace: z.string().trim().optional(),
+  app_name: z.string().trim().optional()
+});
+
+export type InfraReportRequest = z.infer<typeof InfraReportRequestSchema>;
+
 export const DeploymentResultSchema = z.object({
   status: z.string(),
   run_id: z.string(),
@@ -65,6 +75,12 @@ export const DeploymentResultSchema = z.object({
   next_steps: z.array(z.string()).optional(),
   executor_status: z.string().optional(),
   infra_details: z.record(z.unknown()).optional(),
+  infra_report: z.record(z.unknown()).optional(),
+  infra_summary: z.record(z.unknown()).optional(),
+  cleanup: z.record(z.unknown()).optional(),
+  report_warnings: z.array(z.string()).optional(),
+  message: z.string().optional(),
+  aws_account_id: z.string().optional(),
   bodhi_run: z.record(z.unknown()).optional(),
   executor_logs: z.array(z.object({
     command: z.string(),

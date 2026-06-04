@@ -115,10 +115,11 @@ Expected tool:
 deploy_hello_world_to_eks
 get_hello_world_eks_artifact_status
 execute_hello_world_eks_deployment
+get_hello_world_eks_infra_report
 get_hello_world_eks_deployment_status
 ```
 
-`deploy_hello_world_to_eks` starts the Bodhi workflow and returns a `run_id` quickly to avoid ChatGPT request timeouts. `get_hello_world_eks_artifact_status` is read-only and never runs SAM/AWS/kubectl. `execute_hello_world_eks_deployment` performs the explicit infrastructure deployment and requires `confirm_execute=true`. `get_hello_world_eks_deployment_status` remains as a deprecated read-only alias. The deploy tool requires `deployment_context`; ask clarifying questions before calling it.
+`deploy_hello_world_to_eks` starts the Bodhi workflow and returns a `run_id` quickly to avoid ChatGPT request timeouts. `get_hello_world_eks_artifact_status` is read-only and never runs SAM/AWS/kubectl. `execute_hello_world_eks_deployment` performs the explicit infrastructure deployment and requires `confirm_execute=true`; after a healthy deployment it returns `application_url`, `infra_summary`, `infra_report`, realistic monthly cost estimates, and cleanup commands. `get_hello_world_eks_infra_report` is read-only and can rediscover CloudFormation, EKS, VPC, ECR, Kubernetes, endpoint, and cost details later without redeploying. `get_hello_world_eks_deployment_status` remains as a deprecated read-only alias. The deploy tool requires `deployment_context`; ask clarifying questions before calling it.
 
 Minimum test request:
 

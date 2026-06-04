@@ -7,6 +7,7 @@ import type { DeployRequest } from "./schemas.js";
 import type { DeploymentArtifact, ValidatedArtifactBundle } from "./artifacts.js";
 import { deriveStackName, sanitizeName } from "./naming.js";
 import { classifyCommandFailure, rollbackCompleteDiagnostic, type FailureDiagnostic } from "./failureClassifier.js";
+import { cleanupCommands, InfraReporter, type InfraReport } from "./infraReporter.js";
 
 export type CommandRunner = (command: string, args: string[], options: { cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv }) => Promise<CommandResult>;
 
@@ -18,7 +19,7 @@ export type CommandResult = {
 };
 
 export type ExecutorResult = {
-  status: "deployed" | "deployed_pending_endpoint" | "failed" | "blocked";
+  status: "deployed" | "deployed_pending_endpoint" | "deployed_with_report_warnings" | "failed" | "blocked";
   executor_status: "deployed" | "failed" | "blocked";
   workspace: string;
   commands: CommandResult[];
@@ -34,6 +35,11 @@ export type ExecutorResult = {
   application_url?: string;
   rollout_status?: "success" | "failed";
   infra_details?: Record<string, unknown>;
+  infra_report?: InfraReport;
+  infra_summary?: Record<string, unknown>;
+  cleanup?: Record<string, unknown>;
+  report_warnings?: string[];
+  message?: string;
 } & Partial<FailureDiagnostic>;
 
 const SAFE_STACK_STATUSES = new Set(["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"]);
@@ -41,10 +47,12 @@ const SAFE_STACK_STATUSES = new Set(["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDA
 export class DeploymentExecutor {
   private readonly config: Config;
   private readonly runner: CommandRunner;
+  private readonly reporter: InfraReporter;
 
   constructor(config: Config, runner: CommandRunner = runCommand) {
     this.config = config;
     this.runner = runner;
+    this.reporter = new InfraReporter(runner, config.executorCommandTimeoutMs);
   }
 
   async execute(bundle: ValidatedArtifactBundle, request: DeployRequest): Promise<ExecutorResult> {
@@ -165,7 +173,7 @@ export class DeploymentExecutor {
       const context = baseContext(workspace, commands, stackName, clusterName, namespace, appName, region, outputs, cloudformationStatus, bundle.metadata);
 
       if (!serviceHostname) {
-        return {
+        const base = {
           ...context,
           status: "deployed_pending_endpoint",
           executor_status: "deployed",
@@ -176,25 +184,30 @@ export class DeploymentExecutor {
             "Retry status in 2-3 minutes.",
             `kubectl get svc ${serviceName} -n ${namespace}`
           ]
-        };
+        } satisfies ExecutorResult;
+        return this.withInfraReport(base, stackName, region, appName, namespace, clusterName, base.image_mode);
       }
 
-      return {
+      const base = {
         ...context,
         status: "deployed",
         executor_status: "deployed",
         image_mode: this.config.usePublicHelloWorldImage ? "public_nginx_unprivileged" : undefined,
         rollout_status: "success",
         service_hostname: serviceHostname,
-        application_url: `http://${serviceHostname}`
-      };
+        application_url: `http://${serviceHostname}`,
+        message: "Deployment completed and infrastructure report generated."
+      } satisfies ExecutorResult;
+      return this.withInfraReport(base, stackName, region, appName, namespace, clusterName, base.image_mode);
     }
 
-    return {
+    const base = {
       ...baseContext(workspace, commands, stackName, clusterName, namespace, appName, region, outputs, cloudformationStatus, bundle.metadata),
       status: "deployed",
-      executor_status: "deployed"
-    };
+      executor_status: "deployed",
+      message: "Deployment completed and infrastructure report generated."
+    } satisfies ExecutorResult;
+    return this.withInfraReport(base, stackName, region, appName, namespace, clusterName);
   }
 
   buildCommandPlan(bundle: ValidatedArtifactBundle, request: DeployRequest): Array<{ command: string; args: string[] }> {
@@ -338,6 +351,43 @@ export class DeploymentExecutor {
     }
 
     return workspace;
+  }
+
+  private async withInfraReport(base: ExecutorResult, stackName: string, region: string, appName: string, namespace: string, clusterName: string, imageMode?: string): Promise<ExecutorResult> {
+    try {
+      const infraReport = await this.reporter.buildReport({ stackName, region, appName, namespace, clusterName, imageMode });
+      const cost = infraReport.cost_estimate as { monthly_total_estimate?: number };
+      const service = infraReport.kubernetes?.service as { hostname?: string } | undefined;
+      return {
+        ...base,
+        status: infraReport.report_warnings?.length ? "deployed_with_report_warnings" : base.status,
+        infra_report: infraReport,
+        infra_summary: {
+          stack_name: base.stack_name,
+          cloudformation_status: infraReport.cloudformation?.status ?? base.cloudformation_status,
+          cluster_name: base.cluster_name,
+          eks_status: (infraReport.eks as { cluster_status?: string }).cluster_status,
+          namespace: base.namespace,
+          deployment: (infraReport.kubernetes as { deployment_name?: string }).deployment_name,
+          service_hostname: service?.hostname ?? base.service_hostname,
+          monthly_cost_estimate_usd: cost.monthly_total_estimate
+        },
+        cleanup: infraReport.cleanup,
+        report_warnings: infraReport.report_warnings,
+        application_url: base.application_url ?? (service?.hostname ? `http://${service.hostname}` : undefined),
+        message: infraReport.report_warnings?.length
+          ? "Deployment completed, but infrastructure report has warnings."
+          : "Deployment completed and infrastructure report generated."
+      };
+    } catch (error) {
+      return {
+        ...base,
+        status: "deployed_with_report_warnings",
+        report_warnings: [`Could not generate infrastructure report: ${error instanceof Error ? error.message : String(error)}`],
+        cleanup: cleanupCommands(stackName, region),
+        message: "Deployment completed, but infrastructure report generation failed."
+      };
+    }
   }
 }
 

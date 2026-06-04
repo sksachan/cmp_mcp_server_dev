@@ -172,7 +172,7 @@ describe("DeploymentExecutor", () => {
     const executor = new DeploymentExecutor(config, runner);
     const result = await executor.execute(bundle, request);
 
-    expect(result.status).toBe("deployed");
+    expect(["deployed", "deployed_with_report_warnings"]).toContain(result.status);
     expect(result.commands[0].command).toBe("normalize CloudFormation template");
     expect(seenDeployArgs[0]).toContain("--parameter-overrides");
     expect(seenDeployArgs[0]).toContain("ClusterName=hello-world-demo");
@@ -302,6 +302,102 @@ describe("DeploymentExecutor", () => {
           stderr: ""
         };
       }
+      if (command === "aws" && args[0] === "cloudformation" && args[1] === "describe-stacks") {
+        return {
+          command: [command, ...args].join(" "),
+          exitCode: 0,
+          stdout: JSON.stringify({
+            Stacks: [
+              {
+                StackId: "stack-id",
+                StackName: "hello-world-dev-eks",
+                StackStatus: "CREATE_COMPLETE",
+                CreationTime: "2026-06-04T10:00:00.000Z",
+                LastUpdatedTime: "2026-06-04T10:10:00.000Z",
+                Outputs: [
+                  { OutputKey: "VpcId", OutputValue: "vpc-123" },
+                  { OutputKey: "ClusterName", OutputValue: "hello-world-demo" },
+                  { OutputKey: "ClusterEndpoint", OutputValue: "https://cluster.example" },
+                  { OutputKey: "ECRRepositoryUri", OutputValue: "123.dkr.ecr.us-east-1.amazonaws.com/app" }
+                ]
+              }
+            ]
+          }),
+          stderr: ""
+        };
+      }
+      if (command === "aws" && args[0] === "cloudformation" && args[1] === "list-stack-resources") {
+        return {
+          command: [command, ...args].join(" "),
+          exitCode: 0,
+          stdout: JSON.stringify({
+            StackResourceSummaries: [
+              { LogicalResourceId: "VPC", PhysicalResourceId: "vpc-123", ResourceType: "AWS::EC2::VPC", ResourceStatus: "CREATE_COMPLETE" },
+              { LogicalResourceId: "Repository", PhysicalResourceId: "app", ResourceType: "AWS::ECR::Repository", ResourceStatus: "CREATE_COMPLETE" }
+            ]
+          }),
+          stderr: ""
+        };
+      }
+      if (command === "aws" && args[0] === "ec2" && args[1] === "describe-vpcs") {
+        return { command: [command, ...args].join(" "), exitCode: 0, stdout: JSON.stringify({ Vpcs: [{ VpcId: "vpc-123", CidrBlock: "10.0.0.0/16" }] }), stderr: "" };
+      }
+      if (command === "aws" && args[0] === "ec2" && args[1] === "describe-subnets") {
+        return {
+          command: [command, ...args].join(" "),
+          exitCode: 0,
+          stdout: JSON.stringify({
+            Subnets: [
+              { SubnetId: "subnet-public", CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", MapPublicIpOnLaunch: true, State: "available" },
+              { SubnetId: "subnet-private", CidrBlock: "10.0.11.0/24", AvailabilityZone: "us-east-1a", MapPublicIpOnLaunch: false, State: "available" }
+            ]
+          }),
+          stderr: ""
+        };
+      }
+      if (command === "aws" && args[0] === "ec2" && args[1] === "describe-nat-gateways") {
+        return { command: [command, ...args].join(" "), exitCode: 0, stdout: JSON.stringify({ NatGateways: [{ NatGatewayId: "nat-123", State: "available" }] }), stderr: "" };
+      }
+      if (command === "aws" && args[0] === "ec2" && args[1] === "describe-route-tables") {
+        return { command: [command, ...args].join(" "), exitCode: 0, stdout: JSON.stringify({ RouteTables: [{ RouteTableId: "rtb-123" }] }), stderr: "" };
+      }
+      if (command === "aws" && args[0] === "ec2" && args[1] === "describe-security-groups") {
+        return { command: [command, ...args].join(" "), exitCode: 0, stdout: JSON.stringify({ SecurityGroups: [{ GroupId: "sg-123" }] }), stderr: "" };
+      }
+      if (command === "aws" && args[0] === "eks" && args[1] === "describe-cluster") {
+        return {
+          command: [command, ...args].join(" "),
+          exitCode: 0,
+          stdout: JSON.stringify({ cluster: { name: "hello-world-demo", arn: "arn:cluster", status: "ACTIVE", version: "1.29", endpoint: "https://cluster.example" } }),
+          stderr: ""
+        };
+      }
+      if (command === "aws" && args[0] === "eks" && args[1] === "list-nodegroups") {
+        return { command: [command, ...args].join(" "), exitCode: 0, stdout: JSON.stringify({ nodegroups: ["ng-1"] }), stderr: "" };
+      }
+      if (command === "aws" && args[0] === "eks" && args[1] === "describe-nodegroup") {
+        return {
+          command: [command, ...args].join(" "),
+          exitCode: 0,
+          stdout: JSON.stringify({
+            nodegroup: {
+              nodegroupName: "ng-1",
+              status: "ACTIVE",
+              instanceTypes: ["t3.small"],
+              scalingConfig: { desiredSize: 1, minSize: 1, maxSize: 2 },
+              subnets: ["subnet-private"],
+              nodeRole: "arn:node-role"
+            }
+          }),
+          stderr: ""
+        };
+      }
+      if (command === "aws" && args[0] === "ecr" && args[1] === "describe-repositories") {
+        return { command: [command, ...args].join(" "), exitCode: 0, stdout: JSON.stringify({ repositories: [{ repositoryName: "app", repositoryUri: "123.dkr.ecr.us-east-1.amazonaws.com/app" }] }), stderr: "" };
+      }
+      if (command === "aws" && args[0] === "ecr" && args[1] === "describe-images") {
+        return { command: [command, ...args].join(" "), exitCode: 0, stdout: JSON.stringify({ imageDetails: [] }), stderr: "" };
+      }
       if (command === "kubectl" && args[0] === "apply") {
         const manifest = await readFile(`${options.cwd}/k8s.yaml`, "utf8");
         expect(manifest).toContain("image: nginxinc/nginx-unprivileged:alpine");
@@ -311,6 +407,38 @@ describe("DeploymentExecutor", () => {
       }
       if (command === "kubectl" && args.some((arg) => arg.includes("jsonpath"))) {
         return { command: [command, ...args].join(" "), exitCode: 0, stdout: "abc.elb.amazonaws.com", stderr: "" };
+      }
+      if (command === "kubectl" && args[0] === "get" && args[1] === "deployment") {
+        return {
+          command: [command, ...args].join(" "),
+          exitCode: 0,
+          stdout: JSON.stringify({
+            metadata: { name: "hello-world" },
+            spec: { replicas: 1, template: { spec: { containers: [{ image: "nginxinc/nginx-unprivileged:alpine" }] } } },
+            status: { availableReplicas: 1 }
+          }),
+          stderr: ""
+        };
+      }
+      if (command === "kubectl" && args[0] === "get" && args[1] === "pods") {
+        return {
+          command: [command, ...args].join(" "),
+          exitCode: 0,
+          stdout: JSON.stringify({ items: [{ metadata: { name: "pod-1" }, status: { phase: "Running", podIP: "10.0.1.10", containerStatuses: [{ restartCount: 0 }] }, spec: { nodeName: "node-1" } }] }),
+          stderr: ""
+        };
+      }
+      if (command === "kubectl" && args[0] === "get" && args[1] === "svc") {
+        return {
+          command: [command, ...args].join(" "),
+          exitCode: 0,
+          stdout: JSON.stringify({
+            metadata: { name: "hello-world-svc" },
+            spec: { type: "LoadBalancer", ports: [{ port: 80, targetPort: "http", protocol: "TCP" }] },
+            status: { loadBalancer: { ingress: [{ hostname: "abc.elb.amazonaws.com" }] } }
+          }),
+          stderr: ""
+        };
       }
       return { command: [command, ...args].join(" "), exitCode: 0, stdout: "", stderr: "" };
     };

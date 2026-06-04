@@ -1,6 +1,6 @@
 # CMP MCP Server
 
-Remote MCP server for ChatGPT that starts a Bodhi workflow, submits HITL deployment inputs, returns a `run_id` quickly, and exposes a status tool that executes validated EKS deployment artifacts when Bodhi completes.
+Remote MCP server for ChatGPT that starts a Bodhi workflow, reads generated EKS deployment artifacts, explicitly executes validated AWS/SAM/kubectl steps, and returns a sanitized infrastructure report with cost estimates.
 
 ## Local Development
 
@@ -115,4 +115,4 @@ Railway uses the checked-in `Dockerfile` so the runtime image contains Node 22, 
 
 Before `sam validate`, the executor normalizes generated EKS templates by removing inline `SecurityGroupIngress` sections that reference other security groups from `AWS::EC2::SecurityGroup` resources. Those rules should be standalone `AWS::EC2::SecurityGroupIngress` resources; this avoids CloudFormation circular dependencies during EKS security group creation.
 
-The main tool, `deploy_hello_world_to_eks`, starts the Bodhi workflow and returns a `run_id`. ChatGPT should then call read-only `get_hello_world_eks_artifact_status` with that `run_id`. Only `execute_hello_world_eks_deployment` creates or updates AWS infrastructure, and it requires `confirm_execute=true`. The deploy tool requires `deployment_context`, so ChatGPT should ask clarifying questions about purpose, environment, audience, POC/MVP/production maturity, required components, and cost/security constraints before starting artifact generation.
+The main tool, `deploy_hello_world_to_eks`, starts the Bodhi workflow and returns a `run_id`. ChatGPT should then call read-only `get_hello_world_eks_artifact_status` with that `run_id`. Only `execute_hello_world_eks_deployment` creates or updates AWS infrastructure, and it requires `confirm_execute=true`. Successful execution includes `infra_summary`, `infra_report`, `application_url`, monthly cost estimate, and cleanup commands. `get_hello_world_eks_infra_report` can fetch the same style of report later without redeploying. The deploy tool requires `deployment_context`, so ChatGPT should ask clarifying questions about purpose, environment, audience, POC/MVP/production maturity, required components, and cost/security constraints before starting artifact generation.

@@ -1,9 +1,10 @@
 import type { Config } from "./config.js";
-import type { ArtifactStatusRequest, DeploymentResult, DeploymentStatusRequest, DeployRequest, ExecuteDeploymentRequest } from "./schemas.js";
+import type { ArtifactStatusRequest, DeploymentResult, DeploymentStatusRequest, DeployRequest, ExecuteDeploymentRequest, InfraReportRequest } from "./schemas.js";
 import { parseArtifactBundle, validateArtifactBundle, type ArtifactBundle, type ValidatedArtifactBundle } from "./artifacts.js";
-import { DeploymentExecutor, type ExecutorResult } from "./deploymentExecutor.js";
+import { DeploymentExecutor, runCommand, type ExecutorResult } from "./deploymentExecutor.js";
 import { deriveStackName } from "./naming.js";
 import { sanitizeBodhiRun } from "./sanitize.js";
+import { InfraReporter } from "./infraReporter.js";
 
 type Fetch = typeof fetch;
 
@@ -40,6 +41,7 @@ export class BodhiClient {
   private readonly config: Config;
   private readonly fetchImpl: Fetch;
   private readonly executor: Pick<DeploymentExecutor, "execute">;
+  private readonly reporter: InfraReporter;
   private readonly deploymentsByRunId = new Map<string, StoredDeployment>();
   private readonly runIdByRequestKey = new Map<string, { runId: string; expiresAt: number }>();
   private readonly executionResultsByRunId = new Map<string, DeploymentResult>();
@@ -48,6 +50,7 @@ export class BodhiClient {
     this.config = config;
     this.fetchImpl = fetchImpl;
     this.executor = executor;
+    this.reporter = new InfraReporter(runCommand, config.executorCommandTimeoutMs);
   }
 
   async deployHelloWorld(request: DeployRequest): Promise<DeploymentResult> {
@@ -218,6 +221,43 @@ export class BodhiClient {
     return result;
   }
 
+  async getInfraReport(input: InfraReportRequest): Promise<DeploymentResult> {
+    const report = await this.reporter.buildReport({
+      stackName: input.stack_name,
+      region: input.aws_region,
+      appName: input.app_name ?? "hello-world",
+      namespace: input.namespace ?? "hello-world",
+      clusterName: input.cluster_name ?? input.stack_name.replace(/-eks$/, ""),
+      imageMode: this.config.usePublicHelloWorldImage ? "public_nginx_unprivileged" : undefined
+    });
+    const service = report.kubernetes?.service as { hostname?: string } | undefined;
+    const cost = report.cost_estimate as { monthly_total_estimate?: number };
+    return {
+      status: report.report_warnings?.length ? "report_ready_with_warnings" : "report_ready",
+      run_id: "not-applicable",
+      stack_name: input.stack_name,
+      aws_region: input.aws_region,
+      cluster_name: input.cluster_name,
+      namespace: input.namespace,
+      app_name: input.app_name,
+      application_url: service?.hostname ? `http://${service.hostname}` : undefined,
+      infra_summary: {
+        stack_name: input.stack_name,
+        cloudformation_status: report.cloudformation?.status,
+        cluster_name: input.cluster_name,
+        eks_status: (report.eks as { cluster_status?: string }).cluster_status,
+        namespace: input.namespace,
+        deployment: (report.kubernetes as { deployment_name?: string }).deployment_name,
+        service_hostname: service?.hostname,
+        monthly_cost_estimate_usd: cost.monthly_total_estimate
+      },
+      infra_report: report as unknown as Record<string, unknown>,
+      cleanup: report.cleanup,
+      report_warnings: report.report_warnings,
+      message: "Infrastructure report generated."
+    };
+  }
+
   async createRun(request: DeployRequest): Promise<string> {
     const response = await this.request<BodhiRun>(`/tasks/${this.config.bodhiTaskId}/runs`, {
       method: "POST",
@@ -308,8 +348,10 @@ export class BodhiClient {
       status: executorResult.status,
       executor_status: executorResult.executor_status,
       run_id: runId,
+      message: executorResult.message,
       app_name: executorResult.app_name,
       stack_name: executorResult.stack_name,
+      aws_account_id: process.env.AWS_ACCOUNT_ID,
       cloudformation_status: executorResult.cloudformation_status,
       cluster_name: executorResult.cluster_name,
       namespace: executorResult.namespace,
@@ -326,6 +368,10 @@ export class BodhiClient {
       cost_notes: artifactBundle.cost_notes,
       security_notes: artifactBundle.security_notes,
       infra_details: executorResult.infra_details,
+      infra_report: executorResult.infra_report as unknown as Record<string, unknown> | undefined,
+      infra_summary: executorResult.infra_summary,
+      cleanup: executorResult.cleanup,
+      report_warnings: executorResult.report_warnings,
       executor_logs: executorResult.commands.map((command) => ({
         command: command.command,
         exitCode: command.exitCode,

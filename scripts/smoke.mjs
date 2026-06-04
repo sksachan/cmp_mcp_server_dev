@@ -100,6 +100,10 @@ async function assertToolsList() {
     tools.some((tool) => tool.name === "execute_hello_world_eks_deployment"),
     `tools/list did not expose execute_hello_world_eks_deployment: ${JSON.stringify(event)}`
   );
+  assert(
+    tools.some((tool) => tool.name === "get_hello_world_eks_infra_report"),
+    `tools/list did not expose get_hello_world_eks_infra_report: ${JSON.stringify(event)}`
+  );
   const deployTool = tools.find((tool) => tool.name === "deploy_hello_world_to_eks");
   const schemes = deployTool.securitySchemes ?? deployTool._meta?.securitySchemes ?? [];
   assert(
@@ -138,6 +142,10 @@ async function assertOAuthToolsList(accessToken) {
   assert(
     tools.some((tool) => tool.name === "execute_hello_world_eks_deployment"),
     `OAuth tools/list did not expose execute_hello_world_eks_deployment: ${JSON.stringify(event)}`
+  );
+  assert(
+    tools.some((tool) => tool.name === "get_hello_world_eks_infra_report"),
+    `OAuth tools/list did not expose get_hello_world_eks_infra_report: ${JSON.stringify(event)}`
   );
 }
 
