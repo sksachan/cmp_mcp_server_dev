@@ -23,16 +23,40 @@ export const DeploymentStatusRequestSchema = z.object({
 
 export type DeploymentStatusRequest = z.infer<typeof DeploymentStatusRequestSchema>;
 
+export const ArtifactStatusRequestSchema = z.object({
+  run_id: z.string().trim().min(1)
+});
+
+export type ArtifactStatusRequest = z.infer<typeof ArtifactStatusRequestSchema>;
+
+export const ExecuteDeploymentRequestSchema = z.object({
+  run_id: z.string().trim().min(1),
+  confirm_execute: z.boolean(),
+  force_retry: z.boolean().optional().default(false)
+});
+
+export type ExecuteDeploymentRequest = z.infer<typeof ExecuteDeploymentRequestSchema>;
+
 export const DeploymentResultSchema = z.object({
   status: z.string(),
   run_id: z.string(),
+  app_name: z.string().optional(),
+  stack_name: z.string().optional(),
   application_url: z.string().optional(),
   cluster_name: z.string().optional(),
   namespace: z.string().optional(),
   aws_region: z.string().optional(),
+  cloudformation_status: z.string().optional(),
+  service_hostname: z.string().optional(),
+  image_mode: z.string().optional(),
+  failure_stage: z.string().optional(),
+  root_cause: z.string().optional(),
+  remediation: z.array(z.string()).optional(),
+  failed_command: z.string().optional(),
   ecr_repository: z.string().optional(),
   load_balancer: z.string().optional(),
   stack_names: z.array(z.string()).optional(),
+  artifact_filenames: z.array(z.string()).optional(),
   estimated_monthly_cost_usd: z.number().optional(),
   logs_summary: z.string().optional(),
   deployment_plan: z.array(z.string()).optional(),
@@ -40,13 +64,14 @@ export const DeploymentResultSchema = z.object({
   security_notes: z.string().optional(),
   next_steps: z.array(z.string()).optional(),
   executor_status: z.string().optional(),
+  infra_details: z.record(z.unknown()).optional(),
+  bodhi_run: z.record(z.unknown()).optional(),
   executor_logs: z.array(z.object({
     command: z.string(),
     exitCode: z.number(),
     stdout: z.string(),
     stderr: z.string()
-  })).optional(),
-  raw_bodhi_result: z.unknown()
+  })).optional()
 });
 
 export type DeploymentResult = z.infer<typeof DeploymentResultSchema>;

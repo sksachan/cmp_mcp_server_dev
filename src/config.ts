@@ -17,6 +17,7 @@ export type Config = {
   executorCommandTimeoutMs: number;
   requestDedupTtlMs: number;
   jobRetentionMs: number;
+  usePublicHelloWorldImage: boolean;
 };
 
 function required(name: string): string {
@@ -35,6 +36,12 @@ function numberFromEnv(name: string, fallback: number): number {
     throw new Error(`Environment variable ${name} must be a positive number`);
   }
   return parsed;
+}
+
+function booleanFromEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
 }
 
 export function loadConfig(): Config {
@@ -56,6 +63,7 @@ export function loadConfig(): Config {
     oauthAccessTokenTtlSeconds: numberFromEnv("OAUTH_ACCESS_TOKEN_TTL_SECONDS", 86400),
     executorCommandTimeoutMs: numberFromEnv("EXECUTOR_COMMAND_TIMEOUT_MS", 900000),
     requestDedupTtlMs: numberFromEnv("REQUEST_DEDUP_TTL_MS", 900000),
-    jobRetentionMs: numberFromEnv("JOB_RETENTION_MS", 86400000)
+    jobRetentionMs: numberFromEnv("JOB_RETENTION_MS", 86400000),
+    usePublicHelloWorldImage: booleanFromEnv("CMP_USE_PUBLIC_HELLO_WORLD_IMAGE", true)
   };
 }

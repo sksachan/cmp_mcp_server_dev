@@ -21,7 +21,8 @@ const config: Config = {
   oauthAccessTokenTtlSeconds: 3600,
   executorCommandTimeoutMs: 1000,
   requestDedupTtlMs: 1000,
-  jobRetentionMs: 60000
+  jobRetentionMs: 60000,
+  usePublicHelloWorldImage: true
 };
 
 const request: DeployRequest = {
@@ -58,7 +59,7 @@ describe("BodhiClient", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("creates run, submits HITL inputs, and normalizes completion output", async () => {
+  it("creates run and submits HITL inputs without waiting for completion", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       calls.push({ url: String(url), init });
@@ -101,11 +102,11 @@ describe("BodhiClient", () => {
     const client = new BodhiClient(config, fetchImpl as typeof fetch);
     const result = await client.deployHelloWorld(request);
 
-    expect(result.status).toBe("completed");
+    expect(result.status).toBe("started");
     expect(result.run_id).toBe("run-1");
-    expect(result.application_url).toBe("https://app.example.com");
-    expect(result.estimated_monthly_cost_usd).toBe(42);
+    expect(result.stack_name).toBe("hello-world-dev-eks");
     expect(calls.some((call) => call.url.endsWith("/tasks/task-id/runs"))).toBe(true);
+    expect(calls.some((call) => call.url.endsWith("/tasks/task-id/runs/run-1"))).toBe(false);
   });
 
   it("starts a run without waiting for Bodhi completion", async () => {
@@ -173,7 +174,7 @@ describe("BodhiClient", () => {
     expect(createRunCount).toBe(1);
   });
 
-  it("executes Bodhi-generated artifact bundles through the constrained executor", async () => {
+  it("returns read-only artifact status and executes only through explicit execute call", async () => {
     let hitlPollCount = 0;
     const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       if (String(url).endsWith("/tasks/task-id/runs") && init?.method === "POST") {
@@ -213,6 +214,7 @@ describe("BodhiClient", () => {
                 filename: "params.json",
                 content: JSON.stringify({
                   stack_name: "hello-world-dev",
+                  app_name: "hello-world",
                   cluster_name: "hello-world-demo",
                   namespace: "hello-world",
                   aws_region: "us-east-1",
@@ -248,14 +250,128 @@ describe("BodhiClient", () => {
     };
 
     const client = new BodhiClient(config, fetchImpl as typeof fetch, executor);
-    const result = await client.deployHelloWorld(request);
+    const started = await client.deployHelloWorld(request);
+    const status = await client.getArtifactStatus({ run_id: started.run_id });
 
-    expect(result.status).toBe("deployed");
-    expect(result.application_url).toBe("https://artifact.example.com");
-    expect(result.executor_status).toBe("deployed");
-    expect(result.deployment_plan).toEqual(["Validate", "Deploy"]);
-    expect(result.cost_notes).toBe("Development estimate");
-    expect(result.executor_logs?.[0].command).toContain("sam validate");
+    expect(status.status).toBe("artifacts_ready");
+    expect(status.executor_status).toBeUndefined();
+    expect(status.artifact_filenames).toContain("template.yaml");
+
+    const refused = await client.executeHelloWorldDeployment({ run_id: started.run_id, confirm_execute: false, force_retry: false });
+    expect(refused.status).toBe("execution_refused");
+
+    const result = await client.executeHelloWorldDeployment({ run_id: started.run_id, confirm_execute: true, force_retry: false });
+    expect(result.status).toBe("failed");
+    expect(result.failure_stage).toBe("artifact_validation");
+  });
+
+  it("sanitizes read-only artifact status and does not call executor", async () => {
+    let executorCalls = 0;
+    const fetchImpl = async (url: string | URL | Request): Promise<Response> => {
+      if (String(url).endsWith("/tasks/task-id/runs/run-ready")) {
+        return json({
+          id: "run-ready",
+          status: "completed",
+          access_token: "secret-token",
+          exec_metadata: { token: "secret-token" },
+          result: {
+            status: "artifacts_ready",
+            deployment_artifacts: [
+              {
+                type: "cloudformation_template",
+                filename: "template.yaml",
+                content: "Resources: {}\n"
+              },
+              {
+                type: "metadata",
+                filename: "params.json",
+                content: JSON.stringify({
+                  app_name: "hello-world",
+                  stack_name: "hello-world-dev-eks",
+                  cluster_name: "hello-world-demo",
+                  namespace: "hello-world",
+                  aws_region: "us-east-1"
+                })
+              }
+            ]
+          }
+        });
+      }
+      return json({ hitltasks: [] });
+    };
+    const executor = {
+      execute: async () => {
+        executorCalls += 1;
+        throw new Error("should not execute");
+      }
+    };
+
+    const client = new BodhiClient(config, fetchImpl as typeof fetch, executor);
+    const result = await client.getArtifactStatus({ run_id: "run-ready" });
+
+    expect(result.status).toBe("artifacts_ready");
+    expect(executorCalls).toBe(0);
+    expect(JSON.stringify(result)).not.toContain("secret-token");
+    expect(JSON.stringify(result)).not.toContain("exec_metadata");
+  });
+
+  it("caches terminal execution result by run id", async () => {
+    let executorCalls = 0;
+    const fetchImpl = async (url: string | URL | Request): Promise<Response> => {
+      if (String(url).endsWith("/tasks/task-id/runs/run-execute")) {
+        return json({
+          id: "run-execute",
+          status: "completed",
+          result: {
+            status: "artifacts_ready",
+            deployment_artifacts: [
+              {
+                type: "cloudformation_template",
+                filename: "template.yaml",
+                content: "Resources: {}\n"
+              },
+              {
+                type: "metadata",
+                filename: "params.json",
+                content: JSON.stringify({
+                  app_name: "hello-world",
+                  stack_name: "hello-world-dev-eks",
+                  cluster_name: "hello-world-demo",
+                  namespace: "hello-world",
+                  aws_region: "us-east-1"
+                })
+              }
+            ]
+          }
+        });
+      }
+      return json({ hitltasks: [] });
+    };
+    const executor = {
+      execute: async () => {
+        executorCalls += 1;
+        return {
+          status: "deployed" as const,
+          executor_status: "deployed" as const,
+          workspace: "/tmp/workspace",
+          stack_name: "hello-world-dev-eks",
+          cluster_name: "hello-world-demo",
+          namespace: "hello-world",
+          app_name: "hello-world",
+          aws_region: "us-east-1",
+          commands: [],
+          logs_summary: "ok"
+        };
+      }
+    };
+
+    const client = new BodhiClient(config, fetchImpl as typeof fetch, executor);
+    const first = await client.executeHelloWorldDeployment({ run_id: "run-execute", confirm_execute: true, force_retry: false });
+    const second = await client.executeHelloWorldDeployment({ run_id: "run-execute", confirm_execute: true, force_retry: false });
+
+    expect(first.status).toBe("deployed");
+    expect(second.status).toBe("deployed");
+    expect(executorCalls).toBe(1);
   });
 
   it("reports artifacts_missing when Bodhi returns markdown artifact notes instead of JSON artifacts", async () => {
@@ -280,7 +396,7 @@ describe("BodhiClient", () => {
     const result = await client.getDeploymentStatus({ run_id: "run-markdown" });
 
     expect(result.status).toBe("artifacts_missing");
-    expect(result.logs_summary).toContain("markdown");
+    expect(result.logs_summary).toContain("deployment_artifacts");
   });
 });
 

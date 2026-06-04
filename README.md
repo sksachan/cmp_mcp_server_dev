@@ -108,10 +108,11 @@ DEFAULT_BUDGET_LIMIT_USD=100
 OAUTH_ACCESS_TOKEN_TTL_SECONDS=86400
 AWS_SESSION_TOKEN=<optional-session-token>
 EXECUTOR_COMMAND_TIMEOUT_MS=900000
+CMP_USE_PUBLIC_HELLO_WORLD_IMAGE=true
 ```
 
 Railway uses the checked-in `Dockerfile` so the runtime image contains Node 22, AWS CLI, AWS SAM CLI, kubectl, bash, and Python. Bodhi generates deployment artifacts only; this MCP service validates those artifacts and executes fixed AWS/SAM/kubectl commands. Infrastructure is deployed through CloudFormation via `sam validate` and `sam deploy`; Kubernetes manifests are applied only after the CloudFormation stack succeeds.
 
 Before `sam validate`, the executor normalizes generated EKS templates by removing inline `SecurityGroupIngress` sections that reference other security groups from `AWS::EC2::SecurityGroup` resources. Those rules should be standalone `AWS::EC2::SecurityGroupIngress` resources; this avoids CloudFormation circular dependencies during EKS security group creation.
 
-The main tool, `deploy_hello_world_to_eks`, starts the Bodhi workflow and returns a `run_id`. ChatGPT should then call `get_hello_world_eks_deployment_status` with that `run_id`. The deploy tool requires `deployment_context`, so ChatGPT should ask clarifying questions about purpose, environment, audience, POC/MVP/production maturity, required components, and cost/security constraints before starting infrastructure work.
+The main tool, `deploy_hello_world_to_eks`, starts the Bodhi workflow and returns a `run_id`. ChatGPT should then call read-only `get_hello_world_eks_artifact_status` with that `run_id`. Only `execute_hello_world_eks_deployment` creates or updates AWS infrastructure, and it requires `confirm_execute=true`. The deploy tool requires `deployment_context`, so ChatGPT should ask clarifying questions about purpose, environment, audience, POC/MVP/production maturity, required components, and cost/security constraints before starting artifact generation.

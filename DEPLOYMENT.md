@@ -84,6 +84,7 @@ AWS_SECRET_ACCESS_KEY=<aws-secret-access-key>
 AWS_SESSION_TOKEN=<optional-session-token>
 AWS_REGION=us-east-1
 EXECUTOR_COMMAND_TIMEOUT_MS=900000
+CMP_USE_PUBLIC_HELLO_WORLD_IMAGE=true
 ```
 
 Railway normally provides `PORT`; do not hard-code it unless the Railway project requires it.
@@ -112,10 +113,12 @@ Expected tool:
 
 ```text
 deploy_hello_world_to_eks
+get_hello_world_eks_artifact_status
+execute_hello_world_eks_deployment
 get_hello_world_eks_deployment_status
 ```
 
-`deploy_hello_world_to_eks` starts the Bodhi workflow and returns a `run_id` quickly to avoid ChatGPT request timeouts. `get_hello_world_eks_deployment_status` polls that run and executes validated artifacts after Bodhi returns strict JSON. The deploy tool requires `deployment_context`; ask clarifying questions before calling it.
+`deploy_hello_world_to_eks` starts the Bodhi workflow and returns a `run_id` quickly to avoid ChatGPT request timeouts. `get_hello_world_eks_artifact_status` is read-only and never runs SAM/AWS/kubectl. `execute_hello_world_eks_deployment` performs the explicit infrastructure deployment and requires `confirm_execute=true`. `get_hello_world_eks_deployment_status` remains as a deprecated read-only alias. The deploy tool requires `deployment_context`; ask clarifying questions before calling it.
 
 Minimum test request:
 

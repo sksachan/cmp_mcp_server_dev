@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BodhiClient } from "./bodhiClient.js";
-import { DeploymentStatusRequestSchema, DeployRequestSchema } from "./schemas.js";
+import { ArtifactStatusRequestSchema, DeploymentStatusRequestSchema, DeployRequestSchema, ExecuteDeploymentRequestSchema } from "./schemas.js";
 
 export function createMcpServer(bodhiClient: BodhiClient): McpServer {
   const server = new McpServer({
@@ -8,65 +8,71 @@ export function createMcpServer(bodhiClient: BodhiClient): McpServer {
     version: "0.1.0"
   });
 
-  const deployToolOptions = {
-    title: "Deploy Hello World to EKS",
-    description:
-      "Starts the Bodhi EKS artifact-generation workflow and returns a run_id quickly. Before calling, ask the user for deployment_context covering purpose, environment, audience, maturity such as POC/MVP/production, required components, and cost/security constraints. Then call get_hello_world_eks_deployment_status with the returned run_id.",
-    inputSchema: DeployRequestSchema.shape,
-    securitySchemes: [{ type: "oauth2", scopes: ["deploy:eks"] }],
-    _meta: {
-      securitySchemes: [{ type: "oauth2", scopes: ["deploy:eks"] }]
-    }
-  };
+  const securitySchemes = [{ type: "oauth2", scopes: ["deploy:eks"] }];
 
   server.registerTool(
     "deploy_hello_world_to_eks",
-    deployToolOptions as Parameters<McpServer["registerTool"]>[1],
-    async (input) => {
-      const request = DeployRequestSchema.parse(input);
-      const result = await bodhiClient.startHelloWorldDeployment(request);
-
-      return {
-        structuredContent: result,
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }
-        ]
-      };
-    }
+    {
+      title: "Start Hello World EKS Artifact Workflow",
+      description:
+        "Starts the Bodhi EKS artifact-generation workflow only. Does not create AWS infrastructure. Use get_hello_world_eks_artifact_status to check readiness, then execute_hello_world_eks_deployment to create infrastructure.",
+      inputSchema: DeployRequestSchema.shape,
+      securitySchemes,
+      _meta: { securitySchemes }
+    } as Parameters<McpServer["registerTool"]>[1],
+    async (input) => toolResponse(await bodhiClient.startHelloWorldDeployment(DeployRequestSchema.parse(input)))
   );
 
-  const statusToolOptions = {
-    title: "Get Hello World EKS Deployment Status",
-    description:
-      "Checks a previously-started Bodhi run. When Bodhi has completed and returned a valid deployment_artifacts JSON bundle, this validates and executes the approved AWS/SAM/kubectl deployment steps on Railway.",
-    inputSchema: DeploymentStatusRequestSchema.shape,
-    securitySchemes: [{ type: "oauth2", scopes: ["deploy:eks"] }],
-    _meta: {
-      securitySchemes: [{ type: "oauth2", scopes: ["deploy:eks"] }]
-    }
-  };
+  server.registerTool(
+    "get_hello_world_eks_artifact_status",
+    {
+      title: "Get Hello World EKS Artifact Status",
+      description:
+        "Read-only status check for a Bodhi EKS artifact-generation run. Does not run SAM, AWS CLI, Docker, or kubectl.",
+      inputSchema: ArtifactStatusRequestSchema.shape,
+      securitySchemes,
+      _meta: { securitySchemes }
+    } as Parameters<McpServer["registerTool"]>[1],
+    async (input) => toolResponse(await bodhiClient.getArtifactStatus(ArtifactStatusRequestSchema.parse(input)))
+  );
+
+  server.registerTool(
+    "execute_hello_world_eks_deployment",
+    {
+      title: "Execute Hello World EKS Deployment",
+      description:
+        "Explicitly executes approved AWS/SAM/kubectl deployment for a completed Bodhi artifact run. Creates or updates AWS infrastructure. Requires confirm_execute=true.",
+      inputSchema: ExecuteDeploymentRequestSchema.shape,
+      securitySchemes,
+      _meta: { securitySchemes }
+    } as Parameters<McpServer["registerTool"]>[1],
+    async (input) => toolResponse(await bodhiClient.executeHelloWorldDeployment(ExecuteDeploymentRequestSchema.parse(input)))
+  );
 
   server.registerTool(
     "get_hello_world_eks_deployment_status",
-    statusToolOptions as Parameters<McpServer["registerTool"]>[1],
-    async (input) => {
-      const request = DeploymentStatusRequestSchema.parse(input);
-      const result = await bodhiClient.getDeploymentStatus(request);
-
-      return {
-        structuredContent: result,
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }
-        ]
-      };
-    }
+    {
+      title: "Get Hello World EKS Deployment Status Deprecated",
+      description:
+        "Deprecated read-only alias for get_hello_world_eks_artifact_status. Does not run SAM, AWS CLI, Docker, or kubectl.",
+      inputSchema: DeploymentStatusRequestSchema.shape,
+      securitySchemes,
+      _meta: { securitySchemes }
+    } as Parameters<McpServer["registerTool"]>[1],
+    async (input) => toolResponse(await bodhiClient.getDeploymentStatus(DeploymentStatusRequestSchema.parse(input)))
   );
 
   return server;
+}
+
+function toolResponse(result: Record<string, unknown>) {
+  return {
+    structuredContent: result,
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(result, null, 2)
+      }
+    ]
+  };
 }
